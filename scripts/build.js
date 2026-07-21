@@ -8,20 +8,6 @@ let metroProcess = null;
 
 const projectRoot = path.resolve(__dirname, "..");
 
-function findWorkspaceRoot(startDir) {
-  let dir = startDir;
-  while (dir !== path.dirname(dir)) {
-    if (fs.existsSync(path.join(dir, "pnpm-workspace.yaml"))) {
-      return dir;
-    }
-    dir = path.dirname(dir);
-  }
-  throw new Error("Could not find workspace root (no pnpm-workspace.yaml found)");
-}
-
-const workspaceRoot = findWorkspaceRoot(projectRoot);
-const basePath = (process.env.BASE_PATH || "/").replace(/\/+$/, "");
-
 function exitWithError(message) {
   console.error(message);
   if (metroProcess) {
@@ -55,20 +41,12 @@ function stripProtocol(domain) {
 }
 
 function getDeploymentDomain() {
-  if (process.env.REPLIT_INTERNAL_APP_DOMAIN) {
-    return stripProtocol(process.env.REPLIT_INTERNAL_APP_DOMAIN);
-  }
-
-  if (process.env.REPLIT_DEV_DOMAIN) {
-    return stripProtocol(process.env.REPLIT_DEV_DOMAIN);
-  }
-
   if (process.env.EXPO_PUBLIC_DOMAIN) {
     return stripProtocol(process.env.EXPO_PUBLIC_DOMAIN);
   }
 
   console.error(
-    "ERROR: No deployment domain found. Set REPLIT_INTERNAL_APP_DOMAIN, REPLIT_DEV_DOMAIN, or EXPO_PUBLIC_DOMAIN",
+    "ERROR: No deployment domain found. Set EXPO_PUBLIC_DOMAIN (e.g. EXPO_PUBLIC_DOMAIN=myapp.example.com)",
   );
   process.exit(1);
 }
@@ -123,11 +101,7 @@ async function checkMetroHealth() {
   }
 }
 
-function getExpoPublicReplId() {
-  return process.env.REPL_ID || process.env.EXPO_PUBLIC_REPL_ID;
-}
-
-async function startMetro(expoPublicDomain, expoPublicReplId) {
+async function startMetro(expoPublicDomain) {
   const isRunning = await checkMetroHealth();
   if (isRunning) {
     console.log("Metro already running");
@@ -139,17 +113,11 @@ async function startMetro(expoPublicDomain, expoPublicReplId) {
   const env = {
     ...process.env,
     EXPO_PUBLIC_DOMAIN: expoPublicDomain,
-    EXPO_PUBLIC_REPL_ID: expoPublicReplId,
   };
 
-  if (expoPublicReplId) {
-    console.log(`Setting EXPO_PUBLIC_REPL_ID=${expoPublicReplId}`);
-  }
-
   metroProcess = spawn(
-    "pnpm",
+    "npx",
     [
-      "exec",
       "expo",
       "start",
       "--no-dev",
@@ -229,7 +197,7 @@ async function downloadFile(url, outputPath) {
 
 async function downloadBundle(platform, timestamp) {
   const entryPath = path.resolve(projectRoot, "node_modules", "expo-router", "entry");
-  const bundlePath = path.relative(workspaceRoot, entryPath);
+  const bundlePath = path.relative(projectRoot, entryPath);
   const url = new URL(`http://localhost:8081/${bundlePath}.bundle`);
   url.searchParams.set("platform", platform);
   url.searchParams.set("dev", "false");
@@ -390,15 +358,11 @@ async function downloadAssets(assets, timestamp) {
     const output = path.join(outputDir, asset.filename);
 
     try {
-      const candidates = [
-        path.join(projectRoot, decodedPath, asset.filename),
-        path.join(workspaceRoot, decodedPath, asset.filename),
-      ];
-      const found = candidates.find((p) => fs.existsSync(p));
-      if (!found) {
+      const candidate = path.join(projectRoot, decodedPath, asset.filename);
+      if (!fs.existsSync(candidate)) {
         throw new Error(`Asset not found on disk: ${asset.filename}`);
       }
-      fs.copyFileSync(found, output);
+      fs.copyFileSync(candidate, output);
       successCount++;
     } catch (error) {
       failures.push({
@@ -423,6 +387,8 @@ async function downloadAssets(assets, timestamp) {
   console.log(`Copied ${successCount} assets`);
   return successCount;
 }
+
+const basePath = (process.env.BASE_PATH || "/").replace(/\/+$/, "");
 
 function updateBundleUrls(timestamp, baseUrl) {
   const updateForPlatform = (platform) => {
@@ -511,14 +477,13 @@ async function main() {
   setupSignalHandlers();
 
   const domain = getDeploymentDomain();
-  const expoPublicReplId = getExpoPublicReplId();
   const baseUrl = `https://${domain}`;
   const timestamp = `${Date.now()}-${process.pid}`;
 
   prepareDirectories(timestamp);
   clearMetroCache();
 
-  await startMetro(domain, expoPublicReplId);
+  await startMetro(domain);
 
   const downloadTimeout = 600000;
   const downloadPromise = downloadBundlesAndManifests(timestamp);
