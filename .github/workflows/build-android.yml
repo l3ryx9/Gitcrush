@@ -26,7 +26,6 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       BUILD_TYPE: ${{ github.event.inputs.build_type || 'release' }}
       GRADLE_OPTS: -Xmx4g -XX:MaxMetaspaceSize=1g -XX:+HeapDumpOnOutOfMemoryError
-      ANDROID_HOME: ${{ github.workspace }}/android-sdk
       ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
       ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
       ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
@@ -73,20 +72,10 @@ jobs:
           cd ci
           npm install --legacy-peer-deps
 
-      # ── 8. Android SDK ───────────────────────────────────────────────────────
-      - name: Installation Android SDK
-        run: |
-          mkdir -p $ANDROID_HOME/cmdline-tools
-          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmdtools.zip
-          unzip -q /tmp/cmdtools.zip -d /tmp/cmdtools
-          mv /tmp/cmdtools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
-          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
-          echo "$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
-          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
-
+      # ── 8. Acceptation des licences Android SDK (SDK pré-installé sur le runner)
       - name: Acceptation des licences SDK
         run: |
-          yes | sdkmanager --licenses
+          yes | sdkmanager --licenses || true
           sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
       # ── 9. Décodage du keystore de signature ─────────────────────────────────
@@ -111,14 +100,14 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-
 
-      # ── 10. Expo Prebuild ─────────────────────────────────────────────────────
+      # ── 11. Expo Prebuild ─────────────────────────────────────────────────────
       - name: Génération du projet natif Android (expo prebuild)
         run: |
           npx expo prebuild --platform android --clean --no-install 2>&1
         env:
           CI: true
 
-      # ── 11. Build + Retry automatique via IA ─────────────────────────────────
+      # ── 12. Build + Retry automatique via IA ─────────────────────────────────
       - name: Build APK avec auto-correction IA
         id: build
         run: node ci/retryBuild.js
@@ -127,7 +116,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           CI: true
 
-      # ── 12. Upload APK ────────────────────────────────────────────────────────
+      # ── 13. Upload APK ────────────────────────────────────────────────────────
       - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v4
@@ -137,7 +126,7 @@ jobs:
             android/app/build/outputs/apk/**/*.apk
           retention-days: 30
 
-      # ── 13. Upload logs en cas d'échec ────────────────────────────────────────
+      # ── 14. Upload logs en cas d'échec ────────────────────────────────────────
       - name: Upload logs d'échec
         if: failure()
         uses: actions/upload-artifact@v4
@@ -147,7 +136,7 @@ jobs:
             ci/logs/
           retention-days: 7
 
-      # ── 14. Résumé ────────────────────────────────────────────────────────────
+      # ── 15. Résumé ────────────────────────────────────────────────────────────
       - name: Résumé du build
         if: always()
         run: |
