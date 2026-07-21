@@ -27,6 +27,9 @@ jobs:
       BUILD_TYPE: ${{ github.event.inputs.build_type || 'release' }}
       GRADLE_OPTS: -Xmx4g -XX:MaxMetaspaceSize=1g -XX:+HeapDumpOnOutOfMemoryError
       ANDROID_HOME: ${{ github.workspace }}/android-sdk
+      ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
 
     steps:
       # ── 1. Checkout ──────────────────────────────────────────────────────────
@@ -86,7 +89,18 @@ jobs:
           yes | sdkmanager --licenses
           sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
-      # ── 9. Cache Gradle ──────────────────────────────────────────────────────
+      # ── 9. Décodage du keystore de signature ─────────────────────────────────
+      - name: Décodage du keystore release
+        run: |
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/app/release.keystore
+            echo "ANDROID_KEYSTORE_FILE=${{ github.workspace }}/android/app/release.keystore" >> $GITHUB_ENV
+            echo "✅ Keystore release décodé"
+          else
+            echo "⚠️ ANDROID_KEYSTORE_BASE64 non défini — signature debug utilisée"
+          fi
+
+      # ── 10. Cache Gradle ─────────────────────────────────────────────────────
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
