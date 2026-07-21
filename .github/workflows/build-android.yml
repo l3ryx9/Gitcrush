@@ -109,6 +109,13 @@ jobs:
           npx expo prebuild --platform android --clean --no-install 2>&1
         env:
           CI: true
+          ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
+
+      # ── 11b. Forcer local.properties avec le bon chemin SDK ──────────────────
+      - name: Synchronisation android/local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+          echo "✓ local.properties → sdk.dir=$ANDROID_SDK_ROOT"
 
       # ── 12. Build + Retry automatique via IA ─────────────────────────────────
       - name: Build APK avec auto-correction IA
@@ -118,6 +125,7 @@ jobs:
           BUILD_TYPE: ${{ env.BUILD_TYPE }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           CI: true
+          ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
 
       # ── 13. Upload APK ────────────────────────────────────────────────────────
       - name: Upload APK
