@@ -7,8 +7,6 @@ import JSZip from "jszip";
 import React, { useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
-  FlatList,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -20,9 +18,11 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { PickerModal } from "@/components/PickerModal";
 import { useGitHub } from "@/context/GitHubContext";
+import { useI18n } from "@/context/LanguageContext";
 import { useColors } from "@/hooks/useColors";
-import type { GitHubRepo } from "@/context/GitHubContext";
+import { showAlert, showConfirm } from "@/utils/dialogs";
 
 interface SelectedFile {
   name: string;
@@ -31,9 +31,33 @@ interface SelectedFile {
   type: string;
 }
 
+/** Entrées parasites générées par macOS / Windows dans les archives. */
+const JUNK_ENTRY = /(^|\/)(__MACOSX|\.DS_Store|Thumbs\.db|desktop\.ini)(\/|$)/i;
+
+/**
+ * Calcule le préfixe de répertoires commun à TOUS les chemins.
+ * Ex: ["projet-main/src/a.ts", "projet-main/b.ts"] → "projet-main/"
+ * Ex: ["projet-main/src/a.ts", "projet-main/src/b.ts"] → "projet-main/src/"
+ * Ainsi le contenu de l'archive est poussé à la racine du dépôt,
+ * sans recréer le sous-dossier de l'archive.
+ */
+function commonDirPrefix(paths: string[]): string {
+  if (paths.length === 0) return "";
+  const dirParts = paths.map((p) => p.split("/").slice(0, -1));
+  let prefix = dirParts[0];
+  for (let i = 1; i < dirParts.length && prefix.length > 0; i++) {
+    const segs = dirParts[i];
+    let j = 0;
+    while (j < prefix.length && j < segs.length && prefix[j] === segs[j]) j++;
+    prefix = prefix.slice(0, j);
+  }
+  return prefix.length > 0 ? `${prefix.join("/")}/` : "";
+}
+
 export default function FilesScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
+  const { t } = useI18n();
   const {
     user, repos, selectedRepo, branches, currentBranch,
     selectRepo, selectBranch, pushFile, deleteDirectory, clearRepo,
@@ -43,8 +67,8 @@ export default function FilesScreen() {
   const [commitMsg, setCommitMsg] = useState("feat: upload via GitCrush");
   const [targetPath, setTargetPath] = useState("");
   const [pushing, setPushing] = useState(false);
-  const [showRepoList, setShowRepoList] = useState(false);
-  const [showBranchList, setShowBranchList] = useState(false);
+  const [showRepoModal, setShowRepoModal] = useState(false);
+  const [showBranchModal, setShowBranchModal] = useState(false);
   const [repoSearch, setRepoSearch] = useState("");
   const [deletePath, setDeletePath] = useState("");
   const [deleteMsg, setDeleteMsg] = useState("chore: suppression de répertoire via GitCrush");
@@ -58,8 +82,8 @@ export default function FilesScreen() {
   }, [loading, user]);
 
   if (loading) return (
-    <View style={{ flex: 1, backgroundColor: "#0d1117", alignItems: "center", justifyContent: "center" }}>
-      <ActivityIndicator color="#3fb950" size="large" />
+    <View style={{ flex: 1, backgroundColor: "#0a0a0a", alignItems: "center", justifyContent: "center" }}>
+      <ActivityIndicator color="#00ff41" size="large" />
     </View>
   );
 
@@ -84,9 +108,9 @@ export default function FilesScreen() {
         size: a.size ?? 0,
         type: a.mimeType ?? "application/octet-stream",
       });
-      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {/**/});
     } catch {
-      Alert.alert("Erreur", "Impossible de sélectionner le fichier");
+      showAlert(t("msg.error"), t("msg.pickFail"));
     }
   }
 
@@ -102,14 +126,23 @@ export default function FilesScreen() {
     );
   }
 
+  function isRarFile(f: SelectedFile) {
+    return (
+      f.name.toLowerCase().endsWith(".rar") ||
+      f.type === "application/vnd.rar" ||
+      f.type === "application/x-rar-compressed"
+    );
+  }
+
   async function readFileAsBase64(uri: string): Promise<string> {
     if (Platform.OS === "web") {
       const resp = await fetch(uri);
       const buf = await resp.arrayBuffer();
       const bytes = new Uint8Array(buf);
       let binary = "";
-      for (let i = 0; i < bytes.byteLength; i++) {
-        binary += String.fromCharCode(bytes[i]);
+      const CHUNK = 0x8000;
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
       }
       return btoa(binary);
     }
@@ -118,50 +151,47 @@ export default function FilesScreen() {
 
   async function handlePush() {
     if (!selectedRepo) {
-      Alert.alert("Erreur", "Sélectionnez un dépôt d'abord");
+      showAlert(t("msg.error"), t("msg.selectRepoFirst"));
       return;
     }
     if (!file) {
-      Alert.alert("Erreur", "Aucun fichier sélectionné");
+      showAlert(t("msg.error"), t("msg.noFileSelected"));
       return;
     }
     if (!commitMsg.trim()) {
-      Alert.alert("Erreur", "Entrez un message de commit");
+      showAlert(t("msg.error"), t("msg.enterCommitMsg"));
+      return;
+    }
+    if (isRarFile(file)) {
+      showAlert(t("msg.error"), t("msg.rarUnsupported"));
       return;
     }
 
     setPushing(true);
-    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(() => {/**/});
 
     try {
       const base64 = await readFileAsBase64(file.uri);
 
       if (isZipFile(file)) {
         const zip = await JSZip.loadAsync(base64, { base64: true });
-        const entries = Object.values(zip.files).filter((e) => !e.dir);
+        // Filtrer dossiers et fichiers parasites (__MACOSX, .DS_Store, …)
+        const entries = Object.values(zip.files).filter(
+          (e) => !e.dir && !JUNK_ENTRY.test(e.name)
+        );
 
         if (entries.length === 0) {
           setPushing(false);
           setPushProgress(null);
-          Alert.alert("Erreur", "Le zip est vide ou illisible");
+          showAlert(t("msg.error"), t("msg.zipEmpty"));
           return;
         }
 
-        // FIX #3 : détecter un sous-dossier racine commun et le supprimer du chemin
-        // Ex : "Gitcrush-main/app/index.tsx" → "app/index.tsx"
+        // Analyse de l'archive : détecter le(s) sous-dossier(s) racine
+        // commun(s) et les retirer pour ne pas pusher le sous-répertoire
+        // dans la racine du dépôt.
         const rawPaths = entries.map((e) => e.name.replace(/^\/+/, ""));
-        const firstSegments = rawPaths.map((p) => (p.includes("/") ? p.split("/")[0] : null));
-        const allHaveSubfolder = firstSegments.every((s) => s !== null);
-        let stripPrefix = "";
-        if (allHaveSubfolder) {
-          const uniqueRoots = new Set(firstSegments as string[]);
-          if (uniqueRoots.size === 1) {
-            const prefix = [...uniqueRoots][0];
-            if (rawPaths.every((p) => p.startsWith(`${prefix}/`))) {
-              stripPrefix = `${prefix}/`;
-            }
-          }
-        }
+        const stripPrefix = commonDirPrefix(rawPaths);
 
         let successCount = 0;
         const errors: string[] = [];
@@ -171,8 +201,10 @@ export default function FilesScreen() {
           const entry = entries[i];
           try {
             const content = await entry.async("base64");
-            // Supprimer le préfixe commun si détecté
-            const relPath = entry.name.replace(/^\/+/, "").replace(stripPrefix, "");
+            const raw = entry.name.replace(/^\/+/, "");
+            const relPath = stripPrefix && raw.startsWith(stripPrefix)
+              ? raw.slice(stripPrefix.length)
+              : raw;
             if (!relPath) { setPushProgress({ done: i + 1, total: entries.length }); continue; }
             const path = targetPath.trim()
               ? `${targetPath.trim().replace(/\/$/, "")}/${relPath}`
@@ -181,7 +213,7 @@ export default function FilesScreen() {
             if (res.ok) {
               successCount++;
             } else {
-              errors.push(`${relPath}: ${res.error ?? "Erreur inconnue"}`);
+              errors.push(`${relPath}: ${res.error ?? t("msg.unknownError")}`);
             }
           } catch (e) {
             errors.push(`${entry.name}: ${String(e)}`);
@@ -193,17 +225,30 @@ export default function FilesScreen() {
         setPushProgress(null);
 
         if (successCount > 0) {
-          await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {/**/});
           setFile(null);
-          Alert.alert(
-            "Succès",
-            `${successCount}/${entries.length} fichier(s) pushé(s) vers ${selectedRepo.name}/${currentBranch}${stripPrefix ? `\n(Sous-dossier « ${stripPrefix.replace("/", "")} » détecté et ignoré)` : ""}`,
-            [{ text: "Voir les commits", onPress: () => router.push("/(tabs)") }, { text: "OK" }]
-          );
+          const body =
+            t("msg.filesPushed", {
+              done: successCount,
+              total: entries.length,
+              repo: selectedRepo.name,
+              branch: currentBranch,
+            }) +
+            (stripPrefix
+              ? `\n${t("msg.subfolderStripped", { prefix: stripPrefix.replace(/\/$/, "") })}`
+              : "");
+          showAlert(t("msg.success"), body, [
+            { text: t("msg.viewCommits"), onPress: () => router.push("/(tabs)") },
+            { text: t("msg.ok") },
+          ]);
         }
         if (errors.length > 0) {
-          await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-          Alert.alert("Erreurs", errors.slice(0, 20).join("\n") + (errors.length > 20 ? `\n… et ${errors.length - 20} autre(s)` : ""));
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {/**/});
+          showAlert(
+            t("msg.errors"),
+            errors.slice(0, 20).join("\n") +
+              (errors.length > 20 ? `\n${t("msg.andOthers", { n: errors.length - 20 })}` : "")
+          );
         }
         return;
       }
@@ -217,101 +262,106 @@ export default function FilesScreen() {
       setPushing(false);
 
       if (res.ok) {
-        await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {/**/});
         setFile(null);
-        Alert.alert(
-          "Succès",
-          `Fichier pushé vers ${selectedRepo.name}/${currentBranch}`,
-          [{ text: "Voir les commits", onPress: () => router.push("/(tabs)") }, { text: "OK" }]
+        showAlert(
+          t("msg.success"),
+          t("msg.filePushed", {
+            repo: selectedRepo.name,
+            branch: currentBranch,
+            strategy: res.strategy ?? "1",
+          }),
+          [
+            { text: t("msg.viewCommits"), onPress: () => router.push("/(tabs)") },
+            { text: t("msg.ok") },
+          ]
         );
       } else {
-        await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-        Alert.alert("Erreur", res.error ?? "Erreur inconnue");
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {/**/});
+        showAlert(t("msg.error"), res.error ?? t("msg.unknownError"));
       }
     } catch (e) {
       setPushing(false);
       setPushProgress(null);
-      Alert.alert("Erreur", String(e));
+      showAlert(t("msg.error"), String(e));
     }
   }
 
   function handleDeleteDirectory() {
     if (!selectedRepo) {
-      Alert.alert("Erreur", "Sélectionnez un dépôt d'abord");
+      showAlert(t("msg.error"), t("msg.selectRepoFirst"));
       return;
     }
     const path = deletePath.trim().replace(/^\/+/, "").replace(/\/+$/, "");
     if (!path) {
-      Alert.alert("Erreur", "Entrez le chemin du répertoire à supprimer");
+      showAlert(t("msg.error"), t("msg.enterDeletePath"));
       return;
     }
     if (!deleteMsg.trim()) {
-      Alert.alert("Erreur", "Entrez un message de commit");
+      showAlert(t("msg.error"), t("msg.enterCommitMsg"));
       return;
     }
 
-    Alert.alert(
-      "Confirmer la suppression",
-      `Supprimer définitivement « ${path} » (et tout son contenu) de ${selectedRepo.name}/${currentBranch} ?`,
-      [
-        { text: "Annuler", style: "cancel" },
-        {
-          text: "Supprimer",
-          style: "destructive",
-          onPress: async () => {
-            setDeleting(true);
-            await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-            const res = await deleteDirectory(path, deleteMsg.trim());
-            setDeleting(false);
-            if (res.ok) {
-              await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-              setDeletePath("");
-              Alert.alert("Succès", `Répertoire supprimé (${res.deletedCount ?? 0} fichier(s) retiré(s)).`);
-            } else {
-              await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-              Alert.alert("Erreur", res.error ?? "Erreur inconnue");
-            }
-          },
-        },
-      ]
-    );
+    showConfirm({
+      title: t("msg.confirmDeleteTitle"),
+      message: t("msg.confirmDeleteBody", {
+        path,
+        repo: selectedRepo.name,
+        branch: currentBranch,
+      }),
+      confirmText: t("msg.deleteAction"),
+      cancelText: t("msg.cancel"),
+      destructive: true,
+      onConfirm: async () => {
+        setDeleting(true);
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(() => {/**/});
+        const res = await deleteDirectory(path, deleteMsg.trim());
+        setDeleting(false);
+        if (res.ok) {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {/**/});
+          setDeletePath("");
+          showAlert(t("msg.success"), t("msg.dirDeleted", { n: res.deletedCount ?? 0 }));
+        } else {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {/**/});
+          showAlert(t("msg.error"), res.error ?? t("msg.unknownError"));
+        }
+      },
+    });
   }
 
-  // FIX #2 : vider complètement le dépôt
   function handleClearRepo() {
     if (!selectedRepo) {
-      Alert.alert("Erreur", "Sélectionnez un dépôt d'abord");
+      showAlert(t("msg.error"), t("msg.selectRepoFirst"));
       return;
     }
     if (!clearMsg.trim()) {
-      Alert.alert("Erreur", "Entrez un message de commit");
+      showAlert(t("msg.error"), t("msg.enterCommitMsg"));
       return;
     }
 
-    Alert.alert(
-      "⚠️ Vider le dépôt",
-      `Cette action supprimera TOUS les fichiers de ${selectedRepo.name}/${currentBranch}. Cette opération est irréversible.\n\nContinuer ?`,
-      [
-        { text: "Annuler", style: "cancel" },
-        {
-          text: "Vider le dépôt",
-          style: "destructive",
-          onPress: async () => {
-            setClearing(true);
-            await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-            const res = await clearRepo(clearMsg.trim());
-            setClearing(false);
-            if (res.ok) {
-              await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-              Alert.alert("Succès", `Dépôt vidé — ${res.deletedCount ?? 0} fichier(s) supprimé(s).`);
-            } else {
-              await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-              Alert.alert("Erreur", res.error ?? "Erreur inconnue");
-            }
-          },
-        },
-      ]
-    );
+    showConfirm({
+      title: t("msg.confirmClearTitle"),
+      message: t("msg.confirmClearBody", {
+        repo: selectedRepo.name,
+        branch: currentBranch,
+      }),
+      confirmText: t("msg.clearAction"),
+      cancelText: t("msg.cancel"),
+      destructive: true,
+      onConfirm: async () => {
+        setClearing(true);
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(() => {/**/});
+        const res = await clearRepo(clearMsg.trim());
+        setClearing(false);
+        if (res.ok) {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {/**/});
+          showAlert(t("msg.success"), t("msg.repoCleared", { n: res.deletedCount ?? 0 }));
+        } else {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {/**/});
+          showAlert(t("msg.error"), res.error ?? t("msg.unknownError"));
+        }
+      },
+    });
   }
 
   function formatSize(bytes: number) {
@@ -330,117 +380,63 @@ export default function FilesScreen() {
     >
       {/* Header */}
       <View style={[s.header, { paddingTop: insets.top + webTop }]}>
-        <Text style={s.headerTitle}>Fichiers</Text>
+        <Text style={s.headerTitle}>{t("files.title")}</Text>
         {file && (
-          <Pressable onPress={() => setFile(null)}>
-            <Text style={{ color: colors.destructive, fontFamily: "Inter_500Medium", fontSize: 14 }}>Vider</Text>
+          <Pressable onPress={() => setFile(null)} hitSlop={8}>
+            <Text style={{ color: colors.destructive, fontFamily: "Inter_500Medium", fontSize: 14 }}>
+              {t("files.clearSelection")}
+            </Text>
           </Pressable>
         )}
       </View>
 
       <ScrollView style={s.scroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
-        {/* Repo selector */}
+        {/* Repo selector — ouvre un modal défilable */}
         <View style={s.card}>
-          <Text style={s.cardLabel}>DÉPÔT</Text>
+          <Text style={s.cardLabel}>{t("files.repo")}</Text>
           <Pressable
-            style={s.selector}
-            onPress={() => { setShowRepoList((v) => !v); setShowBranchList(false); }}
+            style={({ pressed }) => [s.selector, pressed && { opacity: 0.7 }]}
+            onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {/**/});
+              setShowRepoModal(true);
+            }}
           >
             <Octicons name="repo" size={15} color={colors.mutedForeground} />
             <Text style={[s.selectorText, !selectedRepo && { color: colors.mutedForeground }]}>
-              {selectedRepo ? selectedRepo.full_name : "Sélectionner un dépôt..."}
+              {selectedRepo ? selectedRepo.full_name : t("files.selectRepo")}
             </Text>
-            <Feather name={showRepoList ? "chevron-up" : "chevron-down"} size={15} color={colors.mutedForeground} />
+            <Feather name="chevron-down" size={15} color={colors.mutedForeground} />
           </Pressable>
-
-          {showRepoList && (
-            <View style={s.dropdown}>
-              <TextInput
-                style={s.searchInput}
-                value={repoSearch}
-                onChangeText={setRepoSearch}
-                placeholder="Rechercher..."
-                placeholderTextColor={colors.mutedForeground}
-              />
-              {reposLoading ? (
-                <ActivityIndicator color={colors.accent} style={{ padding: 16 }} />
-              ) : (
-                <FlatList
-                  data={filteredRepos}
-                  keyExtractor={(r) => String(r.id)}
-                  scrollEnabled={false}
-                  renderItem={({ item }: { item: GitHubRepo }) => (
-                    <Pressable
-                      style={[s.dropdownItem, selectedRepo?.id === item.id && { backgroundColor: colors.greenBg }]}
-                      onPress={() => {
-                        selectRepo(item);
-                        setShowRepoList(false);
-                        setRepoSearch("");
-                        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                      }}
-                    >
-                      <Octicons name={item.private ? "lock" : "repo"} size={13} color={colors.mutedForeground} />
-                      <Text style={s.dropdownItemText}>{item.name}</Text>
-                      {selectedRepo?.id === item.id && (
-                        <Feather name="check" size={14} color={colors.accent} />
-                      )}
-                    </Pressable>
-                  )}
-                  ListEmptyComponent={
-                    <Text style={{ color: colors.mutedForeground, padding: 12, fontFamily: "Inter_400Regular", fontSize: 13 }}>
-                      Aucun dépôt trouvé
-                    </Text>
-                  }
-                />
-              )}
-            </View>
-          )}
         </View>
 
-        {/* Branch selector */}
+        {/* Branch selector — ouvre un modal défilable */}
         {selectedRepo && (
           <View style={s.card}>
-            <Text style={s.cardLabel}>BRANCHE</Text>
+            <Text style={s.cardLabel}>{t("files.branch")}</Text>
             <Pressable
-              style={s.selector}
-              onPress={() => { setShowBranchList((v) => !v); setShowRepoList(false); }}
+              style={({ pressed }) => [s.selector, pressed && { opacity: 0.7 }]}
+              onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {/**/});
+                setShowBranchModal(true);
+              }}
             >
               <Octicons name="git-branch" size={15} color={colors.accent} />
               <Text style={s.selectorText}>{currentBranch}</Text>
-              <Feather name={showBranchList ? "chevron-up" : "chevron-down"} size={15} color={colors.mutedForeground} />
+              <Feather name="chevron-down" size={15} color={colors.mutedForeground} />
             </Pressable>
-            {showBranchList && (
-              <View style={s.dropdown}>
-                {branches.map((b) => (
-                  <Pressable
-                    key={b.name}
-                    style={[s.dropdownItem, currentBranch === b.name && { backgroundColor: colors.greenBg }]}
-                    onPress={() => {
-                      selectBranch(b.name);
-                      setShowBranchList(false);
-                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                    }}
-                  >
-                    <Octicons name="git-branch" size={13} color={colors.mutedForeground} />
-                    <Text style={s.dropdownItemText}>{b.name}</Text>
-                    {currentBranch === b.name && <Feather name="check" size={14} color={colors.accent} />}
-                  </Pressable>
-                ))}
-              </View>
-            )}
           </View>
         )}
 
         {/* Target path */}
         <View style={s.card}>
-          <Text style={s.cardLabel}>CHEMIN CIBLE (optionnel)</Text>
+          <Text style={s.cardLabel}>{t("files.targetPath")}</Text>
           <View style={s.inputRow}>
             <Feather name="folder" size={15} color={colors.mutedForeground} />
             <TextInput
               style={s.pathInput}
               value={targetPath}
               onChangeText={setTargetPath}
-              placeholder="ex: src/components"
+              placeholder={t("files.targetPathPh")}
               placeholderTextColor={colors.mutedForeground}
               autoCorrect={false}
               autoCapitalize="none"
@@ -450,14 +446,14 @@ export default function FilesScreen() {
 
         {/* Commit message */}
         <View style={s.card}>
-          <Text style={s.cardLabel}>MESSAGE DE COMMIT</Text>
+          <Text style={s.cardLabel}>{t("files.commitMsg")}</Text>
           <View style={s.inputRow}>
             <Octicons name="git-commit" size={15} color={colors.mutedForeground} />
             <TextInput
               style={s.pathInput}
               value={commitMsg}
               onChangeText={setCommitMsg}
-              placeholder="Message de commit..."
+              placeholder={t("files.commitMsgPh")}
               placeholderTextColor={colors.mutedForeground}
             />
           </View>
@@ -465,33 +461,31 @@ export default function FilesScreen() {
 
         {/* File picker */}
         <View style={s.card}>
-          <Text style={s.cardLabel}>FICHIER</Text>
+          <Text style={s.cardLabel}>{t("files.file")}</Text>
           {!file ? (
-            <Pressable style={s.pickBtn} onPress={pickFile}>
+            <Pressable style={({ pressed }) => [s.pickBtn, pressed && { opacity: 0.7 }]} onPress={pickFile}>
               <Feather name="upload" size={16} color={colors.foreground} />
-              <Text style={s.pickBtnText}>Sélectionner un fichier</Text>
+              <Text style={s.pickBtnText}>{t("files.pickFile")}</Text>
             </Pressable>
           ) : (
             <View style={s.fileList}>
               <View style={s.fileRow}>
-                <Feather name={isZipFile(file) ? "archive" : "file"} size={14} color={colors.mutedForeground} />
+                <Feather name={isZipFile(file) || isRarFile(file) ? "archive" : "file"} size={14} color={colors.mutedForeground} />
                 <View style={{ flex: 1 }}>
                   <Text style={s.fileName} numberOfLines={1}>{file.name}</Text>
                   <Text style={s.fileSize}>{formatSize(file.size)}</Text>
                 </View>
-                <Pressable onPress={removeFile}>
+                <Pressable onPress={removeFile} hitSlop={8}>
                   <Feather name="x" size={16} color={colors.destructive} />
                 </Pressable>
               </View>
-              <Pressable style={[s.pickBtn, { marginTop: 0 }]} onPress={pickFile}>
+              <Pressable style={({ pressed }) => [s.pickBtn, { marginTop: 0 }, pressed && { opacity: 0.7 }]} onPress={pickFile}>
                 <Feather name="refresh-cw" size={14} color={colors.foreground} />
-                <Text style={s.pickBtnText}>Remplacer le fichier</Text>
+                <Text style={s.pickBtnText}>{t("files.replaceFile")}</Text>
               </Pressable>
             </View>
           )}
-          <Text style={s.hint}>
-            Un .zip est automatiquement extrait. Si le zip contient un seul sous-dossier racine (ex: "projet-main/"), il est détecté et ignoré automatiquement.
-          </Text>
+          <Text style={s.hint}>{t("files.zipHint")}</Text>
         </View>
 
         {/* Push button */}
@@ -514,7 +508,7 @@ export default function FilesScreen() {
             <>
               <Octicons name="upload" size={16} color="#fff" />
               <Text style={s.pushBtnText}>
-                {file && isZipFile(file) ? "Extraire et pusher le zip" : "Pusher le fichier"}
+                {file && isZipFile(file) ? t("files.pushZip") : t("files.pushFile")}
               </Text>
             </>
           )}
@@ -523,14 +517,14 @@ export default function FilesScreen() {
         {/* Delete directory */}
         {selectedRepo && (
           <View style={[s.card, { marginTop: 20, borderColor: colors.destructive }]}>
-            <Text style={[s.cardLabel, { color: colors.destructive }]}>SUPPRIMER UN RÉPERTOIRE</Text>
+            <Text style={[s.cardLabel, { color: colors.destructive }]}>{t("files.deleteDir")}</Text>
             <View style={s.inputRow}>
               <Feather name="folder-minus" size={15} color={colors.destructive} />
               <TextInput
                 style={s.pathInput}
                 value={deletePath}
                 onChangeText={setDeletePath}
-                placeholder="ex: src/old-components"
+                placeholder={t("files.deleteDirPh")}
                 placeholderTextColor={colors.mutedForeground}
                 autoCorrect={false}
                 autoCapitalize="none"
@@ -542,7 +536,7 @@ export default function FilesScreen() {
                 style={s.pathInput}
                 value={deleteMsg}
                 onChangeText={setDeleteMsg}
-                placeholder="Message de commit..."
+                placeholder={t("files.commitMsgPh")}
                 placeholderTextColor={colors.mutedForeground}
               />
             </View>
@@ -559,27 +553,25 @@ export default function FilesScreen() {
               ) : (
                 <>
                   <Feather name="trash-2" size={16} color="#fff" />
-                  <Text style={s.pushBtnText}>Supprimer le répertoire</Text>
+                  <Text style={s.pushBtnText}>{t("files.deleteDirBtn")}</Text>
                 </>
               )}
             </Pressable>
           </View>
         )}
 
-        {/* FIX #2 : Vider le dépôt — supprime TOUS les fichiers */}
+        {/* Vider le dépôt — supprime TOUS les fichiers */}
         {selectedRepo && (
           <View style={[s.card, { marginTop: 12, borderColor: colors.destructive }]}>
-            <Text style={[s.cardLabel, { color: colors.destructive }]}>VIDER LE DÉPÔT</Text>
-            <Text style={s.dangerHint}>
-              Supprime TOUS les fichiers du dépôt en un seul commit. Action irréversible.
-            </Text>
+            <Text style={[s.cardLabel, { color: colors.destructive }]}>{t("files.clearRepo")}</Text>
+            <Text style={s.dangerHint}>{t("files.clearRepoHint")}</Text>
             <View style={[s.inputRow, { borderTopWidth: 1, borderColor: colors.border }]}>
               <Octicons name="git-commit" size={15} color={colors.mutedForeground} />
               <TextInput
                 style={s.pathInput}
                 value={clearMsg}
                 onChangeText={setClearMsg}
-                placeholder="Message de commit..."
+                placeholder={t("files.commitMsgPh")}
                 placeholderTextColor={colors.mutedForeground}
               />
             </View>
@@ -596,7 +588,7 @@ export default function FilesScreen() {
               ) : (
                 <>
                   <Feather name="trash" size={16} color="#fff" />
-                  <Text style={s.pushBtnText}>Vider le dépôt</Text>
+                  <Text style={s.pushBtnText}>{t("files.clearRepoBtn")}</Text>
                 </>
               )}
             </Pressable>
@@ -605,6 +597,53 @@ export default function FilesScreen() {
 
         <View style={{ height: insets.bottom + (Platform.OS === "web" ? 34 : 90) }} />
       </ScrollView>
+
+      {/* Sélecteur de dépôt (modal défilable) */}
+      <PickerModal
+        visible={showRepoModal}
+        title={t("home.chooseRepo")}
+        loading={reposLoading}
+        searchable
+        searchValue={repoSearch}
+        onSearchChange={setRepoSearch}
+        searchPlaceholder={t("files.search")}
+        emptyLabel={t("files.noRepoFound")}
+        items={filteredRepos.map((r) => ({
+          key: String(r.id),
+          label: r.full_name,
+          icon: r.private ? ("lock" as const) : ("repo" as const),
+          selected: selectedRepo?.id === r.id,
+        }))}
+        onSelect={(key) => {
+          const repo = repos.find((r) => String(r.id) === key);
+          if (repo) {
+            selectRepo(repo);
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {/**/});
+          }
+          setShowRepoModal(false);
+          setRepoSearch("");
+        }}
+        onClose={() => { setShowRepoModal(false); setRepoSearch(""); }}
+      />
+
+      {/* Sélecteur de branche (modal défilable) */}
+      <PickerModal
+        visible={showBranchModal}
+        title={t("home.chooseBranch")}
+        emptyLabel={t("home.unborn")}
+        items={branches.map((b) => ({
+          key: b.name,
+          label: b.name,
+          icon: "git-branch" as const,
+          selected: currentBranch === b.name,
+        }))}
+        onSelect={(key) => {
+          selectBranch(key);
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {/**/});
+          setShowBranchModal(false);
+        }}
+        onClose={() => setShowBranchModal(false)}
+      />
     </KeyboardAvoidingView>
   );
 }
@@ -648,30 +687,6 @@ function makeStyles(colors: ReturnType<typeof useColors>) {
       paddingVertical: 12,
     },
     selectorText: { flex: 1, fontSize: 14, color: colors.foreground, fontFamily: "Inter_500Medium" },
-    dropdown: {
-      borderTopWidth: 1,
-      borderColor: colors.border,
-      maxHeight: 240,
-    },
-    searchInput: {
-      padding: 10,
-      paddingHorizontal: 14,
-      fontSize: 13,
-      color: colors.foreground,
-      fontFamily: "Inter_400Regular",
-      borderBottomWidth: 1,
-      borderColor: colors.border,
-    },
-    dropdownItem: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 10,
-      paddingHorizontal: 14,
-      paddingVertical: 11,
-      borderBottomWidth: 1,
-      borderColor: colors.border,
-    },
-    dropdownItemText: { flex: 1, fontSize: 13, color: colors.foreground, fontFamily: "Inter_400Regular" },
     inputRow: {
       flexDirection: "row",
       alignItems: "center",
