@@ -5,7 +5,6 @@ import { router } from "expo-router";
 import React from "react";
 import {
   ActivityIndicator,
-  Alert,
   Platform,
   Pressable,
   ScrollView,
@@ -15,8 +14,11 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { LanguagePicker } from "@/components/LanguagePicker";
 import { useGitHub } from "@/context/GitHubContext";
+import { useI18n } from "@/context/LanguageContext";
 import { useColors } from "@/hooks/useColors";
+import { showConfirm } from "@/utils/dialogs";
 
 function Row({
   icon,
@@ -24,12 +26,14 @@ function Row({
   value,
   onPress,
   danger,
+  right,
 }: {
   icon: string;
   label: string;
   value?: string;
   onPress?: () => void;
   danger?: boolean;
+  right?: React.ReactNode;
 }) {
   const colors = useColors();
   return (
@@ -41,7 +45,7 @@ function Row({
           paddingHorizontal: 16,
           paddingVertical: 14,
           gap: 12,
-          backgroundColor: pressed ? colors.secondary : "transparent",
+          backgroundColor: pressed && onPress ? colors.secondary : "transparent",
         },
       ]}
       onPress={onPress}
@@ -57,12 +61,12 @@ function Row({
       >
         {label}
       </Text>
-      {value ? (
+      {right ? right : value ? (
         <Text style={{ fontSize: 13, color: colors.mutedForeground, fontFamily: "Inter_400Regular" }}>
           {value}
         </Text>
       ) : null}
-      {onPress && !danger ? (
+      {onPress && !danger && !right ? (
         <Feather name="chevron-right" size={14} color={colors.mutedForeground} />
       ) : null}
     </Pressable>
@@ -72,6 +76,7 @@ function Row({
 export default function SettingsScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
+  const { t } = useI18n();
   const { user, repos, logout, loading } = useGitHub();
 
   React.useEffect(() => {
@@ -79,30 +84,26 @@ export default function SettingsScreen() {
   }, [loading, user]);
 
   if (loading) return (
-    <View style={{ flex: 1, backgroundColor: "#0d1117", alignItems: "center", justifyContent: "center" }}>
-      <ActivityIndicator color="#3fb950" size="large" />
+    <View style={{ flex: 1, backgroundColor: "#0a0a0a", alignItems: "center", justifyContent: "center" }}>
+      <ActivityIndicator color="#00ff41" size="large" />
     </View>
   );
 
   if (!user) return null;
 
   function confirmLogout() {
-    Alert.alert(
-      "Se déconnecter",
-      "Votre token sera supprimé de l'appareil. Continuer ?",
-      [
-        { text: "Annuler", style: "cancel" },
-        {
-          text: "Déconnecter",
-          style: "destructive",
-          onPress: async () => {
-            await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-            await logout();
-            router.replace("/login");
-          },
-        },
-      ]
-    );
+    showConfirm({
+      title: t("settings.logoutConfirmTitle"),
+      message: t("settings.logoutConfirmBody"),
+      confirmText: t("settings.logoutAction"),
+      cancelText: t("msg.cancel"),
+      destructive: true,
+      onConfirm: async () => {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {/**/});
+        await logout();
+        router.replace("/login");
+      },
+    });
   }
 
   const s = makeStyles(colors);
@@ -111,7 +112,7 @@ export default function SettingsScreen() {
   return (
     <View style={[s.root, { backgroundColor: colors.background }]}>
       <View style={[s.header, { paddingTop: insets.top + webTop }]}>
-        <Text style={s.headerTitle}>Paramètres</Text>
+        <Text style={s.headerTitle}>{t("settings.title")}</Text>
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false}>
@@ -131,35 +132,39 @@ export default function SettingsScreen() {
           </View>
           <View style={s.repoBadge}>
             <Text style={s.repoBadgeNum}>{repos.length}</Text>
-            <Text style={s.repoBadgeLabel}>dépôts</Text>
+            <Text style={s.repoBadgeLabel}>{t("settings.reposBadge")}</Text>
           </View>
         </View>
 
         {/* GitHub section */}
         <View style={s.section}>
-          <Text style={s.sectionTitle}>COMPTE</Text>
+          <Text style={s.sectionTitle}>{t("settings.account")}</Text>
           <View style={s.card}>
-            <Row icon="github" label="Profil GitHub" value={user.login} />
+            <Row icon="github" label={t("settings.githubProfile")} value={user.login} />
             <View style={s.divider} />
-            <Row icon="git-branch" label="Dépôts" value={String(user.public_repos)} />
+            <Row icon="git-branch" label={t("settings.repos")} value={String(user.public_repos)} />
           </View>
         </View>
 
         {/* App section */}
         <View style={s.section}>
-          <Text style={s.sectionTitle}>APPLICATION</Text>
+          <Text style={s.sectionTitle}>{t("settings.app")}</Text>
           <View style={s.card}>
-            <Row icon="info" label="Version" value="1.0.0" />
+            <Row icon="info" label={t("settings.version")} value="1.0.0" />
             <View style={s.divider} />
-            <Row icon="code" label="GitCrush for GitHub" value="" />
+            <Row
+              icon="globe"
+              label={t("settings.language")}
+              right={<LanguagePicker compact={false} />}
+            />
           </View>
         </View>
 
         {/* Danger zone */}
         <View style={s.section}>
-          <Text style={s.sectionTitle}>DANGER</Text>
+          <Text style={s.sectionTitle}>{t("settings.danger")}</Text>
           <View style={s.card}>
-            <Row icon="log-out" label="Se déconnecter" onPress={confirmLogout} danger />
+            <Row icon="log-out" label={t("settings.logout")} onPress={confirmLogout} danger />
           </View>
         </View>
 
