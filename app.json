@@ -1,12 +1,12 @@
 {
   "expo": {
-    "name": "GitSync",
+    "name": "Gitcrush",
     "slug": "gitcrush",
     "owner": "lolilo9",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "gitsync",
+    "scheme": "gitcrush",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
     "splash": {
