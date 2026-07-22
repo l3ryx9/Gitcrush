@@ -16,13 +16,16 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { LanguagePicker } from "@/components/LanguagePicker";
 import { useGitHub } from "@/context/GitHubContext";
+import { useI18n } from "@/context/LanguageContext";
 import { useColors } from "@/hooks/useColors";
 
 export default function LoginScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const { login } = useGitHub();
+  const { t } = useI18n();
 
   const [token, setToken] = useState("");
   const [loading, setLoading] = useState(false);
@@ -31,20 +34,20 @@ export default function LoginScreen() {
 
   async function handleLogin() {
     if (!token.trim()) {
-      setError("Veuillez entrer votre token GitHub");
+      setError(t("login.tokenRequired"));
       return;
     }
     setError("");
     setLoading(true);
-    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {/**/});
     const ok = await login(token.trim());
     setLoading(false);
     if (ok) {
-      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {/**/});
       router.replace("/(tabs)");
     } else {
-      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      setError("Token invalide. Vérifiez vos droits (scope: repo)");
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {/**/});
+      setError(t("login.tokenInvalid"));
     }
   }
 
@@ -61,11 +64,14 @@ export default function LoginScreen() {
       style={[s.root, { backgroundColor: colors.background }]}
       behavior={Platform.OS === "ios" ? "padding" : undefined}
     >
+      {/* Barre du haut : sélecteur de langue à droite */}
+      <View style={[s.topBar, { paddingTop: insets.top + (Platform.OS === "web" ? 67 : 12) }]}>
+        <View style={{ flex: 1 }} />
+        <LanguagePicker />
+      </View>
+
       <ScrollView
-        contentContainerStyle={[
-          s.scroll,
-          { paddingTop: insets.top + (Platform.OS === "web" ? 67 : 20), paddingBottom: insets.bottom + 32 },
-        ]}
+        contentContainerStyle={[s.scroll, { paddingBottom: insets.bottom + 32 }]}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
@@ -75,16 +81,16 @@ export default function LoginScreen() {
             <Octicons name="mark-github" size={40} color={colors.foreground} />
           </View>
           <Text style={s.appName}>GitCrush</Text>
-          <Text style={s.tagline}>Connectez-vous avec votre compte GitHub</Text>
+          <Text style={s.tagline}>{t("login.tagline")}</Text>
         </View>
 
         {/* Steps */}
         <View style={s.stepsCard}>
-          <Text style={s.stepsTitle}>Comment se connecter</Text>
+          <Text style={s.stepsTitle}>{t("login.howTo")}</Text>
           {[
-            { n: "1", text: "Cliquez sur « Créer un token » ci-dessous" },
-            { n: "2", text: "Activez le scope « repo » puis générez le token" },
-            { n: "3", text: "Copiez le token et collez-le dans le champ ci-dessous" },
+            { n: "1", text: t("login.step1") },
+            { n: "2", text: t("login.step2") },
+            { n: "3", text: t("login.step3") },
           ].map((step) => (
             <View key={step.n} style={s.step}>
               <View style={s.stepNum}>
@@ -97,7 +103,7 @@ export default function LoginScreen() {
 
         {/* Token input */}
         <View style={s.inputWrap}>
-          <Text style={s.inputLabel}>Personal Access Token</Text>
+          <Text style={s.inputLabel}>{t("login.tokenLabel")}</Text>
           <View style={s.inputRow}>
             <TextInput
               style={s.input}
@@ -128,7 +134,7 @@ export default function LoginScreen() {
           ) : (
             <>
               <Octicons name="mark-github" size={18} color="#fff" />
-              <Text style={s.loginBtnText}>Se connecter</Text>
+              <Text style={s.loginBtnText}>{t("login.connect")}</Text>
             </>
           )}
         </Pressable>
@@ -139,12 +145,10 @@ export default function LoginScreen() {
           onPress={openTokenPage}
         >
           <Feather name="external-link" size={15} color={colors.accent} />
-          <Text style={s.tokenBtnText}>Créer un token GitHub</Text>
+          <Text style={s.tokenBtnText}>{t("login.createToken")}</Text>
         </Pressable>
 
-        <Text style={s.note}>
-          Votre token est stocké localement et n'est jamais partagé.
-        </Text>
+        <Text style={s.note}>{t("login.note")}</Text>
       </ScrollView>
     </KeyboardAvoidingView>
   );
@@ -153,7 +157,13 @@ export default function LoginScreen() {
 function makeStyles(colors: ReturnType<typeof useColors>) {
   return StyleSheet.create({
     root: { flex: 1 },
-    scroll: { paddingHorizontal: 24 },
+    topBar: {
+      flexDirection: "row",
+      alignItems: "center",
+      paddingHorizontal: 16,
+      paddingBottom: 4,
+    },
+    scroll: { paddingHorizontal: 24, paddingTop: 8 },
     logoWrap: { alignItems: "center", marginBottom: 32 },
     logoCircle: {
       width: 80,
