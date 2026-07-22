@@ -1,2 +1,2 @@
 # git
-GitSync mobile app - Expo source files
+Gitcrush mobile app - Expo source files
