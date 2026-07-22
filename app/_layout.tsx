@@ -15,6 +15,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { GitHubProvider } from "@/context/GitHubContext";
+import { LanguageProvider } from "@/context/LanguageContext";
 
 SplashScreen.preventAutoHideAsync();
 
@@ -51,9 +52,11 @@ export default function RootLayout() {
         <QueryClientProvider client={queryClient}>
           <GestureHandlerRootView style={{ flex: 1 }}>
             <KeyboardProvider>
-              <GitHubProvider>
-                <RootLayoutNav />
-              </GitHubProvider>
+              <LanguageProvider>
+                <GitHubProvider>
+                  <RootLayoutNav />
+                </GitHubProvider>
+              </LanguageProvider>
             </KeyboardProvider>
           </GestureHandlerRootView>
         </QueryClientProvider>
