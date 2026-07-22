@@ -57,9 +57,9 @@ interface GitHubContextType {
 
 const GitHubContext = createContext<GitHubContextType | null>(null);
 
-const TOKEN_KEY = "@gitsync_token";
-const REPO_KEY = "@gitsync_repo";
-const BRANCH_KEY = "@gitsync_branch";
+const TOKEN_KEY = "@gitcrush_token";
+const REPO_KEY = "@gitcrush_repo";
+const BRANCH_KEY = "@gitcrush_branch";
 
 const GH_HEADERS = (tok: string) => ({
   Authorization: `token ${tok}`,
