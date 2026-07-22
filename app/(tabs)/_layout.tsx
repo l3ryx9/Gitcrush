@@ -4,10 +4,12 @@ import { Tabs } from "expo-router";
 import React from "react";
 import { Platform, StyleSheet, View } from "react-native";
 
+import { useI18n } from "@/context/LanguageContext";
 import { useColors } from "@/hooks/useColors";
 
 export default function TabLayout() {
   const colors = useColors();
+  const { t } = useI18n();
   const isIOS = Platform.OS === "ios";
   const isWeb = Platform.OS === "web";
 
@@ -45,7 +47,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: "Home",
+          title: t("tabs.home"),
           tabBarIcon: ({ color, focused }) => (
             <View
               style={[
@@ -64,7 +66,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="files"
         options={{
-          title: "Fichiers",
+          title: t("tabs.files"),
           tabBarIcon: ({ color }) => (
             <Feather name="upload-cloud" size={22} color={color} />
           ),
@@ -73,7 +75,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="settings"
         options={{
-          title: "Profil",
+          title: t("tabs.profile"),
           tabBarIcon: ({ color }) => (
             <Feather name="user" size={22} color={color} />
           ),
