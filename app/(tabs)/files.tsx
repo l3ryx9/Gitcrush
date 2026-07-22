@@ -34,17 +34,23 @@ interface SelectedFile {
 export default function FilesScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  const { user, repos, selectedRepo, branches, currentBranch, selectRepo, selectBranch, pushFile, deleteDirectory, reposLoading, loading } = useGitHub();
+  const {
+    user, repos, selectedRepo, branches, currentBranch,
+    selectRepo, selectBranch, pushFile, deleteDirectory, clearRepo,
+    reposLoading, loading,
+  } = useGitHub();
   const [file, setFile] = useState<SelectedFile | null>(null);
-  const [commitMsg, setCommitMsg] = useState("feat: upload via GitSync");
+  const [commitMsg, setCommitMsg] = useState("feat: upload via GitCrush");
   const [targetPath, setTargetPath] = useState("");
   const [pushing, setPushing] = useState(false);
   const [showRepoList, setShowRepoList] = useState(false);
   const [showBranchList, setShowBranchList] = useState(false);
   const [repoSearch, setRepoSearch] = useState("");
   const [deletePath, setDeletePath] = useState("");
-  const [deleteMsg, setDeleteMsg] = useState("chore: suppression de répertoire via GitSync");
+  const [deleteMsg, setDeleteMsg] = useState("chore: suppression de répertoire via GitCrush");
   const [deleting, setDeleting] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [clearMsg, setClearMsg] = useState("chore: vidage du dépôt via GitCrush");
   const [pushProgress, setPushProgress] = useState<{ done: number; total: number } | null>(null);
 
   React.useEffect(() => {
@@ -131,7 +137,6 @@ export default function FilesScreen() {
       const base64 = await readFileAsBase64(file.uri);
 
       if (isZipFile(file)) {
-        // Zip : extraction et push de TOUS les fichiers qu'il contient
         const zip = await JSZip.loadAsync(base64, { base64: true });
         const entries = Object.values(zip.files).filter((e) => !e.dir);
 
@@ -142,6 +147,22 @@ export default function FilesScreen() {
           return;
         }
 
+        // FIX #3 : détecter un sous-dossier racine commun et le supprimer du chemin
+        // Ex : "Gitcrush-main/app/index.tsx" → "app/index.tsx"
+        const rawPaths = entries.map((e) => e.name.replace(/^\/+/, ""));
+        const firstSegments = rawPaths.map((p) => (p.includes("/") ? p.split("/")[0] : null));
+        const allHaveSubfolder = firstSegments.every((s) => s !== null);
+        let stripPrefix = "";
+        if (allHaveSubfolder) {
+          const uniqueRoots = new Set(firstSegments as string[]);
+          if (uniqueRoots.size === 1) {
+            const prefix = [...uniqueRoots][0];
+            if (rawPaths.every((p) => p.startsWith(`${prefix}/`))) {
+              stripPrefix = `${prefix}/`;
+            }
+          }
+        }
+
         let successCount = 0;
         const errors: string[] = [];
         setPushProgress({ done: 0, total: entries.length });
@@ -150,7 +171,9 @@ export default function FilesScreen() {
           const entry = entries[i];
           try {
             const content = await entry.async("base64");
-            const relPath = entry.name.replace(/^\/+/, "");
+            // Supprimer le préfixe commun si détecté
+            const relPath = entry.name.replace(/^\/+/, "").replace(stripPrefix, "");
+            if (!relPath) { setPushProgress({ done: i + 1, total: entries.length }); continue; }
             const path = targetPath.trim()
               ? `${targetPath.trim().replace(/\/$/, "")}/${relPath}`
               : relPath;
@@ -174,7 +197,7 @@ export default function FilesScreen() {
           setFile(null);
           Alert.alert(
             "Succès",
-            `${successCount}/${entries.length} fichier(s) du zip pushé(s) vers ${selectedRepo.name}/${currentBranch}`,
+            `${successCount}/${entries.length} fichier(s) pushé(s) vers ${selectedRepo.name}/${currentBranch}${stripPrefix ? `\n(Sous-dossier « ${stripPrefix.replace("/", "")} » détecté et ignoré)` : ""}`,
             [{ text: "Voir les commits", onPress: () => router.push("/(tabs)") }, { text: "OK" }]
           );
         }
@@ -229,7 +252,7 @@ export default function FilesScreen() {
 
     Alert.alert(
       "Confirmer la suppression",
-      `Supprimer définitivement le répertoire "${path}" (et tout son contenu) de ${selectedRepo.name}/${currentBranch} ?`,
+      `Supprimer définitivement « ${path} » (et tout son contenu) de ${selectedRepo.name}/${currentBranch} ?`,
       [
         { text: "Annuler", style: "cancel" },
         {
@@ -244,6 +267,43 @@ export default function FilesScreen() {
               await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
               setDeletePath("");
               Alert.alert("Succès", `Répertoire supprimé (${res.deletedCount ?? 0} fichier(s) retiré(s)).`);
+            } else {
+              await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+              Alert.alert("Erreur", res.error ?? "Erreur inconnue");
+            }
+          },
+        },
+      ]
+    );
+  }
+
+  // FIX #2 : vider complètement le dépôt
+  function handleClearRepo() {
+    if (!selectedRepo) {
+      Alert.alert("Erreur", "Sélectionnez un dépôt d'abord");
+      return;
+    }
+    if (!clearMsg.trim()) {
+      Alert.alert("Erreur", "Entrez un message de commit");
+      return;
+    }
+
+    Alert.alert(
+      "⚠️ Vider le dépôt",
+      `Cette action supprimera TOUS les fichiers de ${selectedRepo.name}/${currentBranch}. Cette opération est irréversible.\n\nContinuer ?`,
+      [
+        { text: "Annuler", style: "cancel" },
+        {
+          text: "Vider le dépôt",
+          style: "destructive",
+          onPress: async () => {
+            setClearing(true);
+            await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+            const res = await clearRepo(clearMsg.trim());
+            setClearing(false);
+            if (res.ok) {
+              await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+              Alert.alert("Succès", `Dépôt vidé — ${res.deletedCount ?? 0} fichier(s) supprimé(s).`);
             } else {
               await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
               Alert.alert("Erreur", res.error ?? "Erreur inconnue");
@@ -403,7 +463,7 @@ export default function FilesScreen() {
           </View>
         </View>
 
-        {/* File picker (single file, zip auto-extracted) */}
+        {/* File picker */}
         <View style={s.card}>
           <Text style={s.cardLabel}>FICHIER</Text>
           {!file ? (
@@ -430,7 +490,7 @@ export default function FilesScreen() {
             </View>
           )}
           <Text style={s.hint}>
-            Un fichier .zip est automatiquement extrait : tous les fichiers qu'il contient sont pushés en conservant leur arborescence.
+            Un .zip est automatiquement extrait. Si le zip contient un seul sous-dossier racine (ex: "projet-main/"), il est détecté et ignoré automatiquement.
           </Text>
         </View>
 
@@ -500,6 +560,43 @@ export default function FilesScreen() {
                 <>
                   <Feather name="trash-2" size={16} color="#fff" />
                   <Text style={s.pushBtnText}>Supprimer le répertoire</Text>
+                </>
+              )}
+            </Pressable>
+          </View>
+        )}
+
+        {/* FIX #2 : Vider le dépôt — supprime TOUS les fichiers */}
+        {selectedRepo && (
+          <View style={[s.card, { marginTop: 12, borderColor: colors.destructive }]}>
+            <Text style={[s.cardLabel, { color: colors.destructive }]}>VIDER LE DÉPÔT</Text>
+            <Text style={s.dangerHint}>
+              Supprime TOUS les fichiers du dépôt en un seul commit. Action irréversible.
+            </Text>
+            <View style={[s.inputRow, { borderTopWidth: 1, borderColor: colors.border }]}>
+              <Octicons name="git-commit" size={15} color={colors.mutedForeground} />
+              <TextInput
+                style={s.pathInput}
+                value={clearMsg}
+                onChangeText={setClearMsg}
+                placeholder="Message de commit..."
+                placeholderTextColor={colors.mutedForeground}
+              />
+            </View>
+            <Pressable
+              style={({ pressed }) => [
+                s.deleteBtn,
+                { opacity: pressed || clearing ? 0.6 : 1 },
+              ]}
+              onPress={handleClearRepo}
+              disabled={clearing}
+            >
+              {clearing ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <>
+                  <Feather name="trash" size={16} color="#fff" />
+                  <Text style={s.pushBtnText}>Vider le dépôt</Text>
                 </>
               )}
             </Pressable>
@@ -618,6 +715,14 @@ function makeStyles(colors: ReturnType<typeof useColors>) {
       paddingTop: 2,
       lineHeight: 15,
     },
+    dangerHint: {
+      fontSize: 12,
+      color: colors.mutedForeground,
+      fontFamily: "Inter_400Regular",
+      paddingHorizontal: 14,
+      paddingBottom: 8,
+      lineHeight: 17,
+    },
     pushBtn: {
       flexDirection: "row",
       alignItems: "center",
@@ -642,4 +747,4 @@ function makeStyles(colors: ReturnType<typeof useColors>) {
       borderRadius: colors.radius,
     },
   });
-      }
+}

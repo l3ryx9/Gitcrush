@@ -47,7 +47,8 @@ function Collapsible({ title, children }: { title: string; children?: React.Reac
 export default function HomeScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  const { user, selectedRepo, currentBranch, commits, loading, refreshCommits } = useGitHub();
+  // FIX #1: destructure selectRepo so the X button can actually deselect the repo
+  const { user, selectedRepo, currentBranch, commits, loading, refreshCommits, selectRepo } = useGitHub();
   const [refreshing, setRefreshing] = useState(false);
 
   React.useEffect(() => {
@@ -74,21 +75,14 @@ export default function HomeScreen() {
   }
 
   const s = makeStyles(colors);
-
   const webTop = Platform.OS === "web" ? 67 : 0;
 
   return (
     <View style={[s.root, { backgroundColor: colors.background }]}>
       {/* Header */}
       <View style={[s.header, { paddingTop: insets.top + webTop }]}>
-        <Text style={s.headerTitle}>GitSync</Text>
+        <Text style={s.headerTitle}>GitCrush</Text>
         <View style={s.headerRight}>
-          <Pressable style={s.iconBtn}>
-            <Feather name="settings" size={18} color={colors.mutedForeground} />
-          </Pressable>
-          <Pressable style={s.iconBtn}>
-            <Feather name="circle" size={18} color={colors.mutedForeground} />
-          </Pressable>
           <Pressable style={s.addBtn} onPress={() => router.push("/(tabs)/files")}>
             <Octicons name="diff-added" size={14} color="#fff" />
             <Text style={s.addBtnText}>AJOUTER</Text>
@@ -183,10 +177,12 @@ export default function HomeScreen() {
               <Text style={s.remoteDropdownText} numberOfLines={1}>
                 {selectedRepo ? selectedRepo.name : "Aucun..."}
               </Text>
+              {/* FIX #1: bouton X appelle maintenant selectRepo(null) pour désélectionner */}
               {selectedRepo && (
                 <Pressable
                   onPress={() => {
                     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    selectRepo(null);
                   }}
                 >
                   <Feather name="x" size={14} color={colors.mutedForeground} />

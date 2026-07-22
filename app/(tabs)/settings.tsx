@@ -2,8 +2,9 @@ import { Feather, Octicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { Image } from "expo-image";
 import { router } from "expo-router";
-import React, { useState } from "react";
+import React from "react";
 import {
+  ActivityIndicator,
   Alert,
   Platform,
   Pressable,
@@ -35,8 +36,8 @@ function Row({
     <Pressable
       style={({ pressed }) => [
         {
-          flexDirection: "row",
-          alignItems: "center",
+          flexDirection: "row" as const,
+          alignItems: "center" as const,
           paddingHorizontal: 16,
           paddingVertical: 14,
           gap: 12,
@@ -56,14 +57,14 @@ function Row({
       >
         {label}
       </Text>
-      {value && (
+      {value ? (
         <Text style={{ fontSize: 13, color: colors.mutedForeground, fontFamily: "Inter_400Regular" }}>
           {value}
         </Text>
-      )}
-      {onPress && !danger && (
+      ) : null}
+      {onPress && !danger ? (
         <Feather name="chevron-right" size={14} color={colors.mutedForeground} />
-      )}
+      ) : null}
     </Pressable>
   );
 }
@@ -126,7 +127,7 @@ export default function SettingsScreen() {
           <View style={{ flex: 1 }}>
             <Text style={s.displayName}>{user.name || user.login}</Text>
             <Text style={s.username}>@{user.login}</Text>
-            {user.email && <Text style={s.email}>{user.email}</Text>}
+            {user.email ? <Text style={s.email}>{user.email}</Text> : null}
           </View>
           <View style={s.repoBadge}>
             <Text style={s.repoBadgeNum}>{repos.length}</Text>
@@ -150,7 +151,7 @@ export default function SettingsScreen() {
           <View style={s.card}>
             <Row icon="info" label="Version" value="1.0.0" />
             <View style={s.divider} />
-            <Row icon="code" label="GitSync for GitHub" value="" />
+            <Row icon="code" label="GitCrush for GitHub" value="" />
           </View>
         </View>
 

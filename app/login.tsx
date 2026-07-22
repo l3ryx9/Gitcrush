@@ -50,7 +50,7 @@ export default function LoginScreen() {
 
   function openTokenPage() {
     WebBrowser.openBrowserAsync(
-      "https://github.com/settings/tokens/new?scopes=repo,read:user&description=GitSync+App"
+      "https://github.com/settings/tokens/new?scopes=repo,read:user&description=GitCrush+App"
     );
   }
 
@@ -74,7 +74,7 @@ export default function LoginScreen() {
           <View style={s.logoCircle}>
             <Octicons name="mark-github" size={40} color={colors.foreground} />
           </View>
-          <Text style={s.appName}>GitSync</Text>
+          <Text style={s.appName}>GitCrush</Text>
           <Text style={s.tagline}>Connectez-vous avec votre compte GitHub</Text>
         </View>
 

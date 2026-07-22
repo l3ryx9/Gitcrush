@@ -50,8 +50,9 @@ interface GitHubContextType {
   selectBranch: (branch: string) => Promise<void>;
   fetchRepos: () => Promise<void>;
   refreshCommits: () => Promise<void>;
-  pushFile: (path: string, content: string, message: string) => Promise<{ ok: boolean; error?: string }>;
+  pushFile: (path: string, content: string, message: string) => Promise<{ ok: boolean; error?: string; strategy?: string }>;
   deleteDirectory: (dirPath: string, message: string) => Promise<{ ok: boolean; error?: string; deletedCount?: number }>;
+  clearRepo: (message: string) => Promise<{ ok: boolean; error?: string; deletedCount?: number }>;
 }
 
 const GitHubContext = createContext<GitHubContextType | null>(null);
@@ -163,7 +164,7 @@ export function GitHubProvider({ children }: { children: React.ReactNode }) {
         const data = (await res.json()) as GitHubBranch[];
         setBranches(data);
       }
-    } catch {/**/}
+    } catch {/**/ }
   }
 
   async function loadCommits(tok: string, repo: GitHubRepo, branch: string) {
@@ -217,33 +218,185 @@ export function GitHubProvider({ children }: { children: React.ReactNode }) {
     }
   }
 
-  async function pushFile(path: string, content: string, message: string): Promise<{ ok: boolean; error?: string }> {
-    if (!token || !selectedRepo) return { ok: false, error: "Non authentifié" };
-    try {
-      let sha: string | undefined;
-      const checkRes = await ghFetch(token, `/repos/${selectedRepo.full_name}/contents/${path}?ref=${currentBranch}`);
-      if (checkRes.ok) {
-        const existing = (await checkRes.json()) as { sha: string };
-        sha = existing.sha;
-      }
-
-      const body: Record<string, string> = { message, content, branch: currentBranch };
-      if (sha) body.sha = sha;
-
-      const res = await ghFetch(token, `/repos/${selectedRepo.full_name}/contents/${path}`, {
-        method: "PUT",
-        body: JSON.stringify(body),
-      });
-
-      if (res.ok) {
-        void loadCommits(token, selectedRepo, currentBranch);
-        return { ok: true };
-      }
-      const err = (await res.json()) as { message?: string };
-      return { ok: false, error: err.message ?? "Erreur GitHub" };
-    } catch (e) {
-      return { ok: false, error: String(e) };
+  /**
+   * Stratégie 1 — Contents API (PUT /contents/{path})
+   * Méthode simple, fonctionne pour la majorité des fichiers (<1 MB).
+   */
+  async function pushStrategy1(
+    tok: string,
+    repo: GitHubRepo,
+    branch: string,
+    path: string,
+    content: string,
+    message: string
+  ): Promise<{ ok: boolean; error?: string }> {
+    // Récupérer le SHA du fichier existant si nécessaire
+    let sha: string | undefined;
+    const checkRes = await ghFetch(tok, `/repos/${repo.full_name}/contents/${path}?ref=${branch}`);
+    if (checkRes.ok) {
+      const existing = (await checkRes.json()) as { sha: string };
+      sha = existing.sha;
     }
+    const body: Record<string, string> = { message, content, branch };
+    if (sha) body.sha = sha;
+
+    const res = await ghFetch(tok, `/repos/${repo.full_name}/contents/${path}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+    if (res.ok) return { ok: true };
+    const err = (await res.json()) as { message?: string };
+    return { ok: false, error: err.message ?? "Erreur Contents API" };
+  }
+
+  /**
+   * Stratégie 2 — Contents API avec SHA rafraîchi
+   * Si la stratégie 1 échoue (conflit de SHA, fichier modifié entre-temps),
+   * on refetch le SHA et on réessaie immédiatement.
+   */
+  async function pushStrategy2(
+    tok: string,
+    repo: GitHubRepo,
+    branch: string,
+    path: string,
+    content: string,
+    message: string
+  ): Promise<{ ok: boolean; error?: string }> {
+    // Forcer un refetch du SHA frais
+    let sha: string | undefined;
+    const checkRes = await ghFetch(tok, `/repos/${repo.full_name}/contents/${path}?ref=${branch}&t=${Date.now()}`);
+    if (checkRes.ok) {
+      const existing = (await checkRes.json()) as { sha: string };
+      sha = existing.sha;
+    } else if (checkRes.status !== 404) {
+      return { ok: false, error: `Impossible de lire le fichier (HTTP ${checkRes.status})` };
+    }
+
+    const body: Record<string, string> = { message, content, branch };
+    if (sha) body.sha = sha;
+
+    const res = await ghFetch(tok, `/repos/${repo.full_name}/contents/${path}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+    if (res.ok) return { ok: true };
+    const err = (await res.json()) as { message?: string };
+    return { ok: false, error: err.message ?? "Erreur Contents API (retry)" };
+  }
+
+  /**
+   * Stratégie 3 — Git Data API (blob → tree → commit → ref)
+   * Plus robuste : contourne les limites de la Contents API,
+   * gère les conflits de SHA et les fichiers binaires correctement.
+   */
+  async function pushStrategy3(
+    tok: string,
+    repo: GitHubRepo,
+    branch: string,
+    path: string,
+    content: string,
+    message: string
+  ): Promise<{ ok: boolean; error?: string }> {
+    // 1. Créer le blob avec le contenu base64
+    const blobRes = await ghFetch(tok, `/repos/${repo.full_name}/git/blobs`, {
+      method: "POST",
+      body: JSON.stringify({ content, encoding: "base64" }),
+    });
+    if (!blobRes.ok) return { ok: false, error: "Stratégie 3 : impossible de créer le blob" };
+    const blobData = (await blobRes.json()) as { sha: string };
+
+    // 2. Récupérer le SHA du commit courant
+    const refRes = await ghFetch(tok, `/repos/${repo.full_name}/git/ref/heads/${branch}`);
+    if (!refRes.ok) return { ok: false, error: "Stratégie 3 : impossible de lire la branche" };
+    const refData = (await refRes.json()) as { object: { sha: string } };
+    const commitSha = refData.object.sha;
+
+    // 3. Récupérer le SHA de l'arbre racine
+    const commitRes = await ghFetch(tok, `/repos/${repo.full_name}/git/commits/${commitSha}`);
+    if (!commitRes.ok) return { ok: false, error: "Stratégie 3 : impossible de lire le commit" };
+    const commitData = (await commitRes.json()) as { tree: { sha: string } };
+
+    // 4. Créer un nouvel arbre avec le fichier modifié
+    const newTreeRes = await ghFetch(tok, `/repos/${repo.full_name}/git/trees`, {
+      method: "POST",
+      body: JSON.stringify({
+        base_tree: commitData.tree.sha,
+        tree: [{ path, mode: "100644", type: "blob", sha: blobData.sha }],
+      }),
+    });
+    if (!newTreeRes.ok) return { ok: false, error: "Stratégie 3 : impossible de créer l'arbre" };
+    const newTreeData = (await newTreeRes.json()) as { sha: string };
+
+    // 5. Créer le commit
+    const newCommitRes = await ghFetch(tok, `/repos/${repo.full_name}/git/commits`, {
+      method: "POST",
+      body: JSON.stringify({ message, tree: newTreeData.sha, parents: [commitSha] }),
+    });
+    if (!newCommitRes.ok) return { ok: false, error: "Stratégie 3 : impossible de créer le commit" };
+    const newCommitData = (await newCommitRes.json()) as { sha: string };
+
+    // 6. Mettre à jour la référence de la branche
+    const updateRes = await ghFetch(tok, `/repos/${repo.full_name}/git/refs/heads/${branch}`, {
+      method: "PATCH",
+      body: JSON.stringify({ sha: newCommitData.sha }),
+    });
+    if (!updateRes.ok) return { ok: false, error: "Stratégie 3 : impossible de mettre à jour la branche" };
+    return { ok: true };
+  }
+
+  /**
+   * pushFile — essaie les 3 stratégies dans l'ordre.
+   * Retourne aussi le nom de la stratégie ayant réussi.
+   */
+  async function pushFile(
+    path: string,
+    content: string,
+    message: string
+  ): Promise<{ ok: boolean; error?: string; strategy?: string }> {
+    if (!token || !selectedRepo) return { ok: false, error: "Non authentifié" };
+
+    const errors: string[] = [];
+
+    // Stratégie 1
+    try {
+      const r1 = await pushStrategy1(token, selectedRepo, currentBranch, path, content, message);
+      if (r1.ok) {
+        void loadCommits(token, selectedRepo, currentBranch);
+        return { ok: true, strategy: "1" };
+      }
+      errors.push(`S1: ${r1.error}`);
+    } catch (e) {
+      errors.push(`S1: ${String(e)}`);
+    }
+
+    // Stratégie 2 (refetch SHA)
+    try {
+      const r2 = await pushStrategy2(token, selectedRepo, currentBranch, path, content, message);
+      if (r2.ok) {
+        void loadCommits(token, selectedRepo, currentBranch);
+        return { ok: true, strategy: "2" };
+      }
+      errors.push(`S2: ${r2.error}`);
+    } catch (e) {
+      errors.push(`S2: ${String(e)}`);
+    }
+
+    // Stratégie 3 (Git Data API)
+    try {
+      const r3 = await pushStrategy3(token, selectedRepo, currentBranch, path, content, message);
+      if (r3.ok) {
+        void loadCommits(token, selectedRepo, currentBranch);
+        return { ok: true, strategy: "3" };
+      }
+      errors.push(`S3: ${r3.error}`);
+    } catch (e) {
+      errors.push(`S3: ${String(e)}`);
+    }
+
+    return {
+      ok: false,
+      error: `Toutes les stratégies ont échoué :\n${errors.join("\n")}`,
+    };
   }
 
   async function deleteDirectory(
@@ -255,19 +408,16 @@ export function GitHubProvider({ children }: { children: React.ReactNode }) {
     if (!cleanDir) return { ok: false, error: "Chemin de répertoire invalide" };
 
     try {
-      // 1. Ref de la branche -> sha du commit courant
       const refRes = await ghFetch(token, `/repos/${selectedRepo.full_name}/git/ref/heads/${currentBranch}`);
       if (!refRes.ok) return { ok: false, error: "Impossible de lire la branche" };
       const refData = (await refRes.json()) as { object: { sha: string } };
       const commitSha = refData.object.sha;
 
-      // 2. Commit -> sha de l'arbre racine
       const commitRes = await ghFetch(token, `/repos/${selectedRepo.full_name}/git/commits/${commitSha}`);
       if (!commitRes.ok) return { ok: false, error: "Impossible de lire le commit" };
       const commitData = (await commitRes.json()) as { tree: { sha: string } };
       const rootTreeSha = commitData.tree.sha;
 
-      // 3. Arbre complet et récursif
       const treeRes = await ghFetch(
         token,
         `/repos/${selectedRepo.full_name}/git/trees/${rootTreeSha}?recursive=1`
@@ -275,7 +425,6 @@ export function GitHubProvider({ children }: { children: React.ReactNode }) {
       if (!treeRes.ok) return { ok: false, error: "Impossible de lire l'arborescence" };
       const treeData = (await treeRes.json()) as {
         tree: { path: string; mode: string; type: string; sha: string }[];
-        truncated?: boolean;
       };
 
       const toRemove = (p: string) => p === cleanDir || p.startsWith(`${cleanDir}/`);
@@ -286,7 +435,6 @@ export function GitHubProvider({ children }: { children: React.ReactNode }) {
         return { ok: false, error: "Répertoire introuvable ou déjà vide" };
       }
 
-      // 4. Nouvel arbre reconstruit sans les fichiers du répertoire ciblé
       const newTreeRes = await ghFetch(token, `/repos/${selectedRepo.full_name}/git/trees`, {
         method: "POST",
         body: JSON.stringify({
@@ -296,31 +444,75 @@ export function GitHubProvider({ children }: { children: React.ReactNode }) {
       if (!newTreeRes.ok) return { ok: false, error: "Échec de la création du nouvel arbre" };
       const newTreeData = (await newTreeRes.json()) as { sha: string };
 
-      // 5. Nouveau commit
       const newCommitRes = await ghFetch(token, `/repos/${selectedRepo.full_name}/git/commits`, {
         method: "POST",
-        body: JSON.stringify({
-          message,
-          tree: newTreeData.sha,
-          parents: [commitSha],
-        }),
+        body: JSON.stringify({ message, tree: newTreeData.sha, parents: [commitSha] }),
       });
       if (!newCommitRes.ok) return { ok: false, error: "Échec de la création du commit" };
       const newCommitData = (await newCommitRes.json()) as { sha: string };
 
-      // 6. Mise à jour de la branche
       const updateRefRes = await ghFetch(
         token,
         `/repos/${selectedRepo.full_name}/git/refs/heads/${currentBranch}`,
-        {
-          method: "PATCH",
-          body: JSON.stringify({ sha: newCommitData.sha }),
-        }
+        { method: "PATCH", body: JSON.stringify({ sha: newCommitData.sha }) }
       );
       if (!updateRefRes.ok) return { ok: false, error: "Échec de la mise à jour de la branche" };
 
       void loadCommits(token, selectedRepo, currentBranch);
       return { ok: true, deletedCount: removedCount };
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  }
+
+  async function clearRepo(
+    message: string
+  ): Promise<{ ok: boolean; error?: string; deletedCount?: number }> {
+    if (!token || !selectedRepo) return { ok: false, error: "Non authentifié" };
+    try {
+      const refRes = await ghFetch(token, `/repos/${selectedRepo.full_name}/git/ref/heads/${currentBranch}`);
+      if (!refRes.ok) return { ok: false, error: "Impossible de lire la branche" };
+      const refData = (await refRes.json()) as { object: { sha: string } };
+      const commitSha = refData.object.sha;
+
+      const commitRes = await ghFetch(token, `/repos/${selectedRepo.full_name}/git/commits/${commitSha}`);
+      if (!commitRes.ok) return { ok: false, error: "Impossible de lire le commit" };
+      const commitData = (await commitRes.json()) as { tree: { sha: string } };
+      const rootTreeSha = commitData.tree.sha;
+
+      const treeRes = await ghFetch(
+        token,
+        `/repos/${selectedRepo.full_name}/git/trees/${rootTreeSha}?recursive=1`
+      );
+      if (!treeRes.ok) return { ok: false, error: "Impossible de lire l'arborescence" };
+      const treeData = (await treeRes.json()) as { tree: { type: string }[] };
+      const blobCount = treeData.tree.filter((e) => e.type === "blob").length;
+
+      if (blobCount === 0) return { ok: false, error: "Le dépôt est déjà vide" };
+
+      const newTreeRes = await ghFetch(token, `/repos/${selectedRepo.full_name}/git/trees`, {
+        method: "POST",
+        body: JSON.stringify({ tree: [] }),
+      });
+      if (!newTreeRes.ok) return { ok: false, error: "Échec de la création de l'arbre vide" };
+      const newTreeData = (await newTreeRes.json()) as { sha: string };
+
+      const newCommitRes = await ghFetch(token, `/repos/${selectedRepo.full_name}/git/commits`, {
+        method: "POST",
+        body: JSON.stringify({ message, tree: newTreeData.sha, parents: [commitSha] }),
+      });
+      if (!newCommitRes.ok) return { ok: false, error: "Échec de la création du commit" };
+      const newCommitData = (await newCommitRes.json()) as { sha: string };
+
+      const updateRefRes = await ghFetch(
+        token,
+        `/repos/${selectedRepo.full_name}/git/refs/heads/${currentBranch}`,
+        { method: "PATCH", body: JSON.stringify({ sha: newCommitData.sha }) }
+      );
+      if (!updateRefRes.ok) return { ok: false, error: "Échec de la mise à jour de la branche" };
+
+      void loadCommits(token, selectedRepo, currentBranch);
+      return { ok: true, deletedCount: blobCount };
     } catch (e) {
       return { ok: false, error: String(e) };
     }
@@ -332,7 +524,7 @@ export function GitHubProvider({ children }: { children: React.ReactNode }) {
         token, user, repos, selectedRepo, branches, currentBranch,
         commits, loading, reposLoading,
         login, logout, selectRepo, selectBranch,
-        fetchRepos, refreshCommits, pushFile, deleteDirectory,
+        fetchRepos, refreshCommits, pushFile, deleteDirectory, clearRepo,
       }}
     >
       {children}

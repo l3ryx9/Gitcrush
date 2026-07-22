@@ -1,8 +1,8 @@
 import { Feather, Octicons } from "@expo/vector-icons";
+import { BlurView } from "expo-blur";
 import { Tabs } from "expo-router";
 import React from "react";
 import { Platform, StyleSheet, View } from "react-native";
-import { BlurView } from "expo-blur";
 
 import { useColors } from "@/hooks/useColors";
 
