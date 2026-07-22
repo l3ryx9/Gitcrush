@@ -1,6 +1,7 @@
-import { Feather, Ionicons, Octicons } from "@expo/vector-icons";
+import { Feather, Octicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { router } from "expo-router";
+import * as WebBrowser from "expo-web-browser";
 import React, { useState } from "react";
 import {
   ActivityIndicator,
@@ -15,8 +16,11 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { PickerModal } from "@/components/PickerModal";
 import { useGitHub } from "@/context/GitHubContext";
+import { useI18n } from "@/context/LanguageContext";
 import { useColors } from "@/hooks/useColors";
+import { showAlert } from "@/utils/dialogs";
 
 function timeAgo(dateStr: string) {
   const diff = Date.now() - new Date(dateStr).getTime();
@@ -27,14 +31,21 @@ function timeAgo(dateStr: string) {
   return `${Math.floor(hrs / 24)}j`;
 }
 
+function hapticLight() {
+  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {/**/});
+}
+
 function Collapsible({ title, children }: { title: string; children?: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   const colors = useColors();
   return (
     <View style={{ borderTopWidth: 1, borderColor: colors.border }}>
       <Pressable
-        style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 16, paddingHorizontal: 16 }}
-        onPress={() => setOpen((v) => !v)}
+        style={({ pressed }) => [
+          { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 16, paddingHorizontal: 16 },
+          pressed && { opacity: 0.7 },
+        ]}
+        onPress={() => { setOpen((v) => !v); hapticLight(); }}
       >
         <Text style={{ color: colors.foreground, fontFamily: "Inter_600SemiBold", fontSize: 14 }}>{title}</Text>
         <Feather name={open ? "chevron-up" : "chevron-down"} size={16} color={colors.mutedForeground} />
@@ -47,9 +58,17 @@ function Collapsible({ title, children }: { title: string; children?: React.Reac
 export default function HomeScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  // FIX #1: destructure selectRepo so the X button can actually deselect the repo
-  const { user, selectedRepo, currentBranch, commits, loading, refreshCommits, selectRepo } = useGitHub();
+  const { t } = useI18n();
+  const {
+    user, repos, selectedRepo, branches, currentBranch, commits,
+    loading, reposLoading, refreshCommits, selectRepo, selectBranch,
+  } = useGitHub();
   const [refreshing, setRefreshing] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [showRepoModal, setShowRepoModal] = useState(false);
+  const [showBranchModal, setShowBranchModal] = useState(false);
+  const [repoSearch, setRepoSearch] = useState("");
+  const [notifsOn, setNotifsOn] = useState(false);
 
   React.useEffect(() => {
     if (!loading && !user) {
@@ -59,19 +78,56 @@ export default function HomeScreen() {
 
   if (loading) {
     return (
-      <View style={{ flex: 1, backgroundColor: "#0d1117", alignItems: "center", justifyContent: "center" }}>
-        <ActivityIndicator color="#3fb950" size="large" />
+      <View style={{ flex: 1, backgroundColor: "#0a0a0a", alignItems: "center", justifyContent: "center" }}>
+        <ActivityIndicator color="#00ff41" size="large" />
       </View>
     );
   }
 
   if (!user) return null;
 
+  const filteredRepos = repos.filter((r) =>
+    r.name.toLowerCase().includes(repoSearch.toLowerCase())
+  );
+
   async function onRefresh() {
     setRefreshing(true);
-    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    hapticLight();
     await refreshCommits();
     setRefreshing(false);
+  }
+
+  // SYNC : actualise réellement les commits
+  async function onSyncPress() {
+    if (!selectedRepo) {
+      showAlert(t("msg.error"), t("home.selectRepoFirst"));
+      return;
+    }
+    setSyncing(true);
+    hapticLight();
+    await refreshCommits();
+    setSyncing(false);
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {/**/});
+  }
+
+  // CLONER : ouvre le dépôt sur GitHub (page où l'URL de clone est copiable)
+  function onClonePress() {
+    if (!selectedRepo) {
+      setShowRepoModal(true);
+      return;
+    }
+    hapticLight();
+    WebBrowser.openBrowserAsync(selectedRepo.html_url).catch(() => {/**/});
+  }
+
+  function goFiles() {
+    hapticLight();
+    router.push("/(tabs)/files");
+  }
+
+  function goSettings() {
+    hapticLight();
+    router.push("/(tabs)/settings");
   }
 
   const s = makeStyles(colors);
@@ -83,9 +139,13 @@ export default function HomeScreen() {
       <View style={[s.header, { paddingTop: insets.top + webTop }]}>
         <Text style={s.headerTitle}>GitCrush</Text>
         <View style={s.headerRight}>
-          <Pressable style={s.addBtn} onPress={() => router.push("/(tabs)/files")}>
+          <Pressable
+            style={({ pressed }) => [s.addBtn, pressed && { opacity: 0.8 }]}
+            onPress={goFiles}
+            hitSlop={6}
+          >
             <Octicons name="diff-added" size={14} color="#fff" />
-            <Text style={s.addBtnText}>AJOUTER</Text>
+            <Text style={s.addBtnText}>{t("home.add")}</Text>
           </Pressable>
         </View>
       </View>
@@ -103,16 +163,12 @@ export default function HomeScreen() {
       >
         {/* Commits card */}
         <View style={s.commitsCard}>
-          {loading ? (
-            <View style={s.emptyBox}>
-              <ActivityIndicator color={colors.accent} />
-            </View>
-          ) : commits.length === 0 ? (
+          {commits.length === 0 ? (
             <View style={s.emptyBox}>
               <Octicons name="git-commit" size={24} color={colors.mutedForeground} style={{ marginBottom: 10 }} />
-              <Text style={s.emptyText}>AUCUN COMMIT TROUVÉ...</Text>
+              <Text style={s.emptyText}>{t("home.noCommits")}</Text>
               {!selectedRepo && (
-                <Text style={s.emptyHint}>Sélectionnez un dépôt pour voir les commits</Text>
+                <Text style={s.emptyHint}>{t("home.selectRepoHint")}</Text>
               )}
             </View>
           ) : (
@@ -139,98 +195,199 @@ export default function HomeScreen() {
           )}
         </View>
 
-        {/* Current branch */}
+        {/* Current branch — appuyer sur la ligne ou le + ouvre le sélecteur de branche */}
         <View style={s.section}>
           <View style={s.sectionHeader}>
-            <Text style={s.sectionLabel}>CURRENT BRANCH</Text>
+            <Text style={s.sectionLabel}>{t("home.currentBranch")}</Text>
           </View>
-          <View style={s.branchRow}>
+          <Pressable
+            style={({ pressed }) => [s.branchRow, pressed && { opacity: 0.8 }]}
+            onPress={() => {
+              if (!selectedRepo) { setShowRepoModal(true); return; }
+              hapticLight();
+              setShowBranchModal(true);
+            }}
+          >
             <Octicons name="git-branch" size={16} color={colors.accent} style={{ marginRight: 8 }} />
-            <Text style={s.branchName}>{selectedRepo ? currentBranch : "UNBORN BRANCH"}</Text>
-            <Pressable style={s.plusBtn}>
-              <Feather name="plus" size={16} color={colors.mutedForeground} />
-            </Pressable>
-          </View>
+            <Text style={s.branchName}>{selectedRepo ? currentBranch : t("home.unborn")}</Text>
+            <View style={s.plusBtn}>
+              <Feather name="chevron-down" size={16} color={colors.mutedForeground} />
+            </View>
+          </Pressable>
         </View>
 
-        {/* Sync row */}
-        <View style={s.syncRow}>
-          <Feather name="download-cloud" size={18} color={colors.mutedForeground} />
-          <Text style={s.syncText}>SYNC LES MODIFICATIONS</Text>
+        {/* Sync row — la ligne entière synchronise les commits */}
+        <Pressable
+          style={({ pressed }) => [s.syncRow, pressed && { opacity: 0.8 }]}
+          onPress={onSyncPress}
+          disabled={syncing}
+        >
+          {syncing ? (
+            <ActivityIndicator size="small" color={colors.accent} />
+          ) : (
+            <Feather name="download-cloud" size={18} color={colors.mutedForeground} />
+          )}
+          <Text style={s.syncText}>{t("home.syncChanges")}</Text>
           <View style={{ flex: 1 }} />
-          <Pressable style={s.iconBtn}>
+          <Pressable
+            style={({ pressed }) => [s.iconBtn, pressed && { opacity: 0.6 }]}
+            onPress={goFiles}
+            hitSlop={4}
+          >
             <Feather name="more-horizontal" size={16} color={colors.mutedForeground} />
           </Pressable>
-          <Pressable style={s.iconBtn}>
+          <Pressable
+            style={({ pressed }) => [s.iconBtn, pressed && { opacity: 0.6 }]}
+            onPress={goSettings}
+            hitSlop={4}
+          >
             <Feather name="settings" size={15} color={colors.mutedForeground} />
           </Pressable>
-          <Pressable style={s.iconBtn}>
-            <Feather name="bell-off" size={15} color={colors.mutedForeground} />
+          <Pressable
+            style={({ pressed }) => [s.iconBtn, pressed && { opacity: 0.6 }]}
+            onPress={() => {
+              const next = !notifsOn;
+              setNotifsOn(next);
+              hapticLight();
+              showAlert(next ? t("home.notifsOn") : t("home.notifsOff"));
+            }}
+            hitSlop={4}
+          >
+            <Feather name={notifsOn ? "bell" : "bell-off"} size={15} color={notifsOn ? colors.accent : colors.mutedForeground} />
           </Pressable>
-        </View>
+        </Pressable>
 
         {/* Remote / Origin */}
         <View style={s.remoteSection}>
-          <Text style={s.sectionLabel}>DISTANT · ORIGIN</Text>
+          <Text style={s.sectionLabel}>{t("home.remoteOrigin")}</Text>
           <View style={s.remoteRow}>
-            <View style={s.remoteDropdown}>
+            {/* Le dropdown ouvre le sélecteur de dépôt */}
+            <Pressable
+              style={({ pressed }) => [s.remoteDropdown, pressed && { opacity: 0.8 }]}
+              onPress={() => { hapticLight(); setShowRepoModal(true); }}
+            >
               <Text style={s.remoteDropdownText} numberOfLines={1}>
-                {selectedRepo ? selectedRepo.name : "Aucun..."}
+                {selectedRepo ? selectedRepo.name : t("home.none")}
               </Text>
-              {/* FIX #1: bouton X appelle maintenant selectRepo(null) pour désélectionner */}
-              {selectedRepo && (
+              {selectedRepo ? (
                 <Pressable
+                  hitSlop={8}
                   onPress={() => {
-                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    hapticLight();
                     selectRepo(null);
                   }}
                 >
                   <Feather name="x" size={14} color={colors.mutedForeground} />
                 </Pressable>
+              ) : (
+                <Feather name="chevron-down" size={14} color={colors.mutedForeground} />
               )}
-            </View>
-            <Pressable style={s.cloneBtn} onPress={() => router.push("/(tabs)/files")}>
-              <Feather name="download-cloud" size={14} color={colors.foreground} />
-              <Text style={s.cloneBtnText}>CLONER</Text>
             </Pressable>
             <Pressable
-              style={[s.authBtn, { backgroundColor: selectedRepo ? colors.primary : colors.card }]}
-              onPress={() => router.push("/(tabs)/files")}
+              style={({ pressed }) => [s.cloneBtn, pressed && { opacity: 0.7 }]}
+              onPress={onClonePress}
+            >
+              <Feather name="download-cloud" size={14} color={colors.foreground} />
+              <Text style={s.cloneBtnText}>{t("home.clone")}</Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [
+                s.authBtn,
+                { backgroundColor: selectedRepo ? colors.primary : colors.card },
+                pressed && { opacity: 0.7 },
+              ]}
+              onPress={goSettings}
             >
               <Feather name="check-circle" size={14} color={selectedRepo ? "#fff" : colors.mutedForeground} />
-              <Text style={[s.authBtnText, { color: selectedRepo ? "#fff" : colors.mutedForeground }]}>AUTH</Text>
+              <Text style={[s.authBtnText, { color: selectedRepo ? "#fff" : colors.mutedForeground }]}>{t("home.auth")}</Text>
             </Pressable>
           </View>
         </View>
 
         {/* Directory */}
         <View style={s.dirSection}>
-          <Text style={s.sectionLabel}>RÉPERTOIRE</Text>
-          <View style={s.dirRow}>
+          <Text style={s.sectionLabel}>{t("home.directory")}</Text>
+          <Pressable
+            style={({ pressed }) => [s.dirRow, pressed && { opacity: 0.8 }]}
+            onPress={goFiles}
+          >
             <Text style={s.dirText} numberOfLines={1}>
-              {selectedRepo ? `/${selectedRepo.full_name}` : "Aucun dépôt sélectionné..."}
+              {selectedRepo ? `/${selectedRepo.full_name}` : t("home.noRepoSelected")}
             </Text>
-            <Pressable style={s.iconBtn} onPress={() => router.push("/(tabs)/files")}>
+            <View style={s.iconBtn}>
               <Feather name="folder" size={18} color={colors.mutedForeground} />
-            </Pressable>
-          </View>
+            </View>
+          </Pressable>
         </View>
 
         {/* Collapsibles */}
         <View style={s.collapsibles}>
-          <Collapsible title="GIT FILTERS" />
-          <Collapsible title="App Sync Settings">
+          <Collapsible title={t("home.gitFilters")}>
             <View style={{ padding: 16, paddingTop: 0 }}>
-              <Text style={{ color: colors.mutedForeground, fontSize: 13, fontFamily: "Inter_400Regular" }}>
-                Configurez vos préférences de synchronisation dans l'onglet Fichiers.
-              </Text>
+              <Text style={s.collapsibleText}>{t("home.gitFiltersHint")}</Text>
             </View>
           </Collapsible>
-          <Collapsible title="PARAMÈTRES DE SYNC PLANIFIÉE" />
+          <Collapsible title={t("home.appSync")}>
+            <View style={{ padding: 16, paddingTop: 0 }}>
+              <Text style={s.collapsibleText}>{t("home.appSyncHint")}</Text>
+            </View>
+          </Collapsible>
+          <Collapsible title={t("home.scheduledSync")}>
+            <View style={{ padding: 16, paddingTop: 0 }}>
+              <Text style={s.collapsibleText}>{t("home.scheduledSyncHint")}</Text>
+            </View>
+          </Collapsible>
         </View>
 
         <View style={{ height: insets.bottom + (Platform.OS === "web" ? 34 : 90) }} />
       </ScrollView>
+
+      {/* Sélecteur de dépôt */}
+      <PickerModal
+        visible={showRepoModal}
+        title={t("home.chooseRepo")}
+        loading={reposLoading}
+        searchable
+        searchValue={repoSearch}
+        onSearchChange={setRepoSearch}
+        searchPlaceholder={t("files.search")}
+        emptyLabel={t("files.noRepoFound")}
+        items={filteredRepos.map((r) => ({
+          key: String(r.id),
+          label: r.full_name,
+          icon: r.private ? ("lock" as const) : ("repo" as const),
+          selected: selectedRepo?.id === r.id,
+        }))}
+        onSelect={(key) => {
+          const repo = repos.find((r) => String(r.id) === key);
+          if (repo) {
+            selectRepo(repo);
+            hapticLight();
+          }
+          setShowRepoModal(false);
+          setRepoSearch("");
+        }}
+        onClose={() => { setShowRepoModal(false); setRepoSearch(""); }}
+      />
+
+      {/* Sélecteur de branche */}
+      <PickerModal
+        visible={showBranchModal}
+        title={t("home.chooseBranch")}
+        emptyLabel={t("home.unborn")}
+        items={branches.map((b) => ({
+          key: b.name,
+          label: b.name,
+          icon: "git-branch" as const,
+          selected: currentBranch === b.name,
+        }))}
+        onSelect={(key) => {
+          selectBranch(key);
+          hapticLight();
+          setShowBranchModal(false);
+        }}
+        onClose={() => setShowBranchModal(false)}
+      />
     </View>
   );
 }
@@ -369,7 +526,7 @@ function makeStyles(colors: ReturnType<typeof useColors>) {
       color: colors.foreground,
       fontFamily: "Inter_700Bold",
     },
-    remoteSection: { paddingHorizontal: 12, paddingVertical: 8 },
+    remoteSection: { paddingHorizontal: 12, paddingVertical: 8, gap: 8 },
     remoteRow: { flexDirection: "row", alignItems: "center", gap: 8 },
     remoteDropdown: {
       flex: 1,
@@ -409,7 +566,7 @@ function makeStyles(colors: ReturnType<typeof useColors>) {
       paddingVertical: 9,
     },
     authBtnText: { fontSize: 12, fontWeight: "700" as const, fontFamily: "Inter_700Bold" },
-    dirSection: { paddingHorizontal: 12, paddingVertical: 8 },
+    dirSection: { paddingHorizontal: 12, paddingVertical: 8, gap: 8 },
     dirRow: {
       flexDirection: "row",
       alignItems: "center",
@@ -429,6 +586,12 @@ function makeStyles(colors: ReturnType<typeof useColors>) {
       borderWidth: 1,
       borderColor: colors.border,
       overflow: "hidden",
+    },
+    collapsibleText: {
+      color: colors.mutedForeground,
+      fontSize: 13,
+      fontFamily: "Inter_400Regular",
+      lineHeight: 18,
     },
   });
 }
