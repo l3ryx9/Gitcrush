@@ -51,6 +51,11 @@ interface GitHubContextType {
   fetchRepos: () => Promise<void>;
   refreshCommits: () => Promise<void>;
   pushFile: (path: string, content: string, message: string) => Promise<{ ok: boolean; error?: string; strategy?: string }>;
+  pushFiles: (
+    files: { path: string; content: string }[],
+    message: string,
+    onProgress?: (done: number, total: number) => void
+  ) => Promise<{ ok: boolean; error?: string; pushedCount?: number }>;
   deleteDirectory: (dirPath: string, message: string) => Promise<{ ok: boolean; error?: string; deletedCount?: number }>;
   clearRepo: (message: string) => Promise<{ ok: boolean; error?: string; deletedCount?: number }>;
 }
@@ -72,6 +77,22 @@ async function ghFetch(tok: string, path: string, options?: RequestInit) {
     ...options,
     headers: { ...GH_HEADERS(tok), ...(options?.headers ?? {}) },
   });
+}
+
+/**
+ * Extrait le vrai message d'erreur renvoyé par l'API GitHub (au lieu d'un
+ * message générique du style "Échec de X"), pour pouvoir diagnostiquer
+ * précisément ce qui a échoué (permissions, SHA obsolète, rate limit, etc.).
+ */
+async function ghError(res: Response, fallback: string): Promise<string> {
+  try {
+    const body = (await res.json()) as { message?: string; errors?: { message?: string }[] };
+    const detail = body.errors?.map((e) => e.message).filter(Boolean).join("; ");
+    const msg = [body.message, detail].filter(Boolean).join(" — ");
+    return msg ? `${fallback} (HTTP ${res.status}) : ${msg}` : `${fallback} (HTTP ${res.status})`;
+  } catch {
+    return `${fallback} (HTTP ${res.status})`;
+  }
 }
 
 export function GitHubProvider({ children }: { children: React.ReactNode }) {
@@ -399,6 +420,85 @@ export function GitHubProvider({ children }: { children: React.ReactNode }) {
     };
   }
 
+  /**
+   * pushFiles — pousse PLUSIEURS fichiers en UN SEUL commit via la Git Data
+   * API : tous les blobs sont créés en parallèle, puis un seul arbre + un
+   * seul commit + une seule mise à jour de branche. C'est la technique la
+   * plus rapide pour un import groupé (ex: décompression d'un ZIP) — au
+   * lieu d'un aller-retour réseau complet par fichier (et donc un commit
+   * séparé par fichier), tout est envoyé en une poignée de requêtes.
+   */
+  async function pushFiles(
+    files: { path: string; content: string }[],
+    message: string,
+    onProgress?: (done: number, total: number) => void
+  ): Promise<{ ok: boolean; error?: string; pushedCount?: number }> {
+    if (!token || !selectedRepo) return { ok: false, error: "Non authentifié" };
+    if (files.length === 0) return { ok: false, error: "Aucun fichier à pousser" };
+
+    try {
+      const refRes = await ghFetch(token, `/repos/${selectedRepo.full_name}/git/ref/heads/${currentBranch}`);
+      if (!refRes.ok) return { ok: false, error: await ghError(refRes, "Impossible de lire la branche") };
+      const refData = (await refRes.json()) as { object: { sha: string } };
+      const commitSha = refData.object.sha;
+
+      const commitRes = await ghFetch(token, `/repos/${selectedRepo.full_name}/git/commits/${commitSha}`);
+      if (!commitRes.ok) return { ok: false, error: await ghError(commitRes, "Impossible de lire le commit") };
+      const commitData = (await commitRes.json()) as { tree: { sha: string } };
+      const rootTreeSha = commitData.tree.sha;
+
+      // Création de tous les blobs EN PARALLÈLE (c'est ça, le gros du gain
+      // de vitesse : N requêtes concurrentes au lieu de N requêtes en série).
+      let done = 0;
+      const blobs = await Promise.all(
+        files.map(async (f) => {
+          const blobRes = await ghFetch(token, `/repos/${selectedRepo.full_name}/git/blobs`, {
+            method: "POST",
+            body: JSON.stringify({ content: f.content, encoding: "base64" }),
+          });
+          done++;
+          onProgress?.(done, files.length);
+          if (!blobRes.ok) throw new Error(await ghError(blobRes, `Blob "${f.path}"`));
+          const blobData = (await blobRes.json()) as { sha: string };
+          return { path: f.path, sha: blobData.sha };
+        })
+      );
+
+      // Un seul arbre, basé sur l'arbre existant (base_tree), avec toutes
+      // les entrées ajoutées/modifiées d'un coup.
+      const newTreeRes = await ghFetch(token, `/repos/${selectedRepo.full_name}/git/trees`, {
+        method: "POST",
+        body: JSON.stringify({
+          base_tree: rootTreeSha,
+          tree: blobs.map((b) => ({ path: b.path, mode: "100644", type: "blob", sha: b.sha })),
+        }),
+      });
+      if (!newTreeRes.ok) return { ok: false, error: await ghError(newTreeRes, "Échec de la création de l'arbre") };
+      const newTreeData = (await newTreeRes.json()) as { sha: string };
+
+      // Un seul commit pour tous les fichiers.
+      const newCommitRes = await ghFetch(token, `/repos/${selectedRepo.full_name}/git/commits`, {
+        method: "POST",
+        body: JSON.stringify({ message, tree: newTreeData.sha, parents: [commitSha] }),
+      });
+      if (!newCommitRes.ok) return { ok: false, error: await ghError(newCommitRes, "Échec de la création du commit") };
+      const newCommitData = (await newCommitRes.json()) as { sha: string };
+
+      // Une seule mise à jour de la branche.
+      const updateRefRes = await ghFetch(
+        token,
+        `/repos/${selectedRepo.full_name}/git/refs/heads/${currentBranch}`,
+        { method: "PATCH", body: JSON.stringify({ sha: newCommitData.sha }) }
+      );
+      if (!updateRefRes.ok) return { ok: false, error: await ghError(updateRefRes, "Échec de la mise à jour de la branche") };
+
+      void loadCommits(token, selectedRepo, currentBranch);
+      return { ok: true, pushedCount: files.length };
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  }
+
   async function deleteDirectory(
     dirPath: string,
     message: string
@@ -409,12 +509,12 @@ export function GitHubProvider({ children }: { children: React.ReactNode }) {
 
     try {
       const refRes = await ghFetch(token, `/repos/${selectedRepo.full_name}/git/ref/heads/${currentBranch}`);
-      if (!refRes.ok) return { ok: false, error: "Impossible de lire la branche" };
+      if (!refRes.ok) return { ok: false, error: await ghError(refRes, "Impossible de lire la branche") };
       const refData = (await refRes.json()) as { object: { sha: string } };
       const commitSha = refData.object.sha;
 
       const commitRes = await ghFetch(token, `/repos/${selectedRepo.full_name}/git/commits/${commitSha}`);
-      if (!commitRes.ok) return { ok: false, error: "Impossible de lire le commit" };
+      if (!commitRes.ok) return { ok: false, error: await ghError(commitRes, "Impossible de lire le commit") };
       const commitData = (await commitRes.json()) as { tree: { sha: string } };
       const rootTreeSha = commitData.tree.sha;
 
@@ -422,10 +522,18 @@ export function GitHubProvider({ children }: { children: React.ReactNode }) {
         token,
         `/repos/${selectedRepo.full_name}/git/trees/${rootTreeSha}?recursive=1`
       );
-      if (!treeRes.ok) return { ok: false, error: "Impossible de lire l'arborescence" };
+      if (!treeRes.ok) return { ok: false, error: await ghError(treeRes, "Impossible de lire l'arborescence") };
       const treeData = (await treeRes.json()) as {
         tree: { path: string; mode: string; type: string; sha: string }[];
+        truncated?: boolean;
       };
+      // Un arbre tronqué (dépôt volumineux, >100 000 entrées) ne contient pas
+      // tous les fichiers : reconstruire l'arbre à partir de cette liste
+      // incomplète supprimerait des fichiers par erreur. On refuse plutôt
+      // que de risquer une perte de données silencieuse.
+      if (treeData.truncated) {
+        return { ok: false, error: "Dépôt trop volumineux pour cette opération (arborescence tronquée par GitHub)" };
+      }
 
       const toRemove = (p: string) => p === cleanDir || p.startsWith(`${cleanDir}/`);
       const remaining = treeData.tree.filter((e) => e.type === "blob" && !toRemove(e.path));
@@ -441,14 +549,14 @@ export function GitHubProvider({ children }: { children: React.ReactNode }) {
           tree: remaining.map((e) => ({ path: e.path, mode: e.mode, type: e.type, sha: e.sha })),
         }),
       });
-      if (!newTreeRes.ok) return { ok: false, error: "Échec de la création du nouvel arbre" };
+      if (!newTreeRes.ok) return { ok: false, error: await ghError(newTreeRes, "Échec de la création du nouvel arbre") };
       const newTreeData = (await newTreeRes.json()) as { sha: string };
 
       const newCommitRes = await ghFetch(token, `/repos/${selectedRepo.full_name}/git/commits`, {
         method: "POST",
         body: JSON.stringify({ message, tree: newTreeData.sha, parents: [commitSha] }),
       });
-      if (!newCommitRes.ok) return { ok: false, error: "Échec de la création du commit" };
+      if (!newCommitRes.ok) return { ok: false, error: await ghError(newCommitRes, "Échec de la création du commit") };
       const newCommitData = (await newCommitRes.json()) as { sha: string };
 
       const updateRefRes = await ghFetch(
@@ -456,7 +564,7 @@ export function GitHubProvider({ children }: { children: React.ReactNode }) {
         `/repos/${selectedRepo.full_name}/git/refs/heads/${currentBranch}`,
         { method: "PATCH", body: JSON.stringify({ sha: newCommitData.sha }) }
       );
-      if (!updateRefRes.ok) return { ok: false, error: "Échec de la mise à jour de la branche" };
+      if (!updateRefRes.ok) return { ok: false, error: await ghError(updateRefRes, "Échec de la mise à jour de la branche") };
 
       void loadCommits(token, selectedRepo, currentBranch);
       return { ok: true, deletedCount: removedCount };
@@ -471,12 +579,12 @@ export function GitHubProvider({ children }: { children: React.ReactNode }) {
     if (!token || !selectedRepo) return { ok: false, error: "Non authentifié" };
     try {
       const refRes = await ghFetch(token, `/repos/${selectedRepo.full_name}/git/ref/heads/${currentBranch}`);
-      if (!refRes.ok) return { ok: false, error: "Impossible de lire la branche" };
+      if (!refRes.ok) return { ok: false, error: await ghError(refRes, "Impossible de lire la branche") };
       const refData = (await refRes.json()) as { object: { sha: string } };
       const commitSha = refData.object.sha;
 
       const commitRes = await ghFetch(token, `/repos/${selectedRepo.full_name}/git/commits/${commitSha}`);
-      if (!commitRes.ok) return { ok: false, error: "Impossible de lire le commit" };
+      if (!commitRes.ok) return { ok: false, error: await ghError(commitRes, "Impossible de lire le commit") };
       const commitData = (await commitRes.json()) as { tree: { sha: string } };
       const rootTreeSha = commitData.tree.sha;
 
@@ -484,8 +592,8 @@ export function GitHubProvider({ children }: { children: React.ReactNode }) {
         token,
         `/repos/${selectedRepo.full_name}/git/trees/${rootTreeSha}?recursive=1`
       );
-      if (!treeRes.ok) return { ok: false, error: "Impossible de lire l'arborescence" };
-      const treeData = (await treeRes.json()) as { tree: { type: string }[] };
+      if (!treeRes.ok) return { ok: false, error: await ghError(treeRes, "Impossible de lire l'arborescence") };
+      const treeData = (await treeRes.json()) as { tree: { type: string }[]; truncated?: boolean };
       const blobCount = treeData.tree.filter((e) => e.type === "blob").length;
 
       if (blobCount === 0) return { ok: false, error: "Le dépôt est déjà vide" };
@@ -494,14 +602,14 @@ export function GitHubProvider({ children }: { children: React.ReactNode }) {
         method: "POST",
         body: JSON.stringify({ tree: [] }),
       });
-      if (!newTreeRes.ok) return { ok: false, error: "Échec de la création de l'arbre vide" };
+      if (!newTreeRes.ok) return { ok: false, error: await ghError(newTreeRes, "Échec de la création de l'arbre vide") };
       const newTreeData = (await newTreeRes.json()) as { sha: string };
 
       const newCommitRes = await ghFetch(token, `/repos/${selectedRepo.full_name}/git/commits`, {
         method: "POST",
         body: JSON.stringify({ message, tree: newTreeData.sha, parents: [commitSha] }),
       });
-      if (!newCommitRes.ok) return { ok: false, error: "Échec de la création du commit" };
+      if (!newCommitRes.ok) return { ok: false, error: await ghError(newCommitRes, "Échec de la création du commit") };
       const newCommitData = (await newCommitRes.json()) as { sha: string };
 
       const updateRefRes = await ghFetch(
@@ -509,7 +617,7 @@ export function GitHubProvider({ children }: { children: React.ReactNode }) {
         `/repos/${selectedRepo.full_name}/git/refs/heads/${currentBranch}`,
         { method: "PATCH", body: JSON.stringify({ sha: newCommitData.sha }) }
       );
-      if (!updateRefRes.ok) return { ok: false, error: "Échec de la mise à jour de la branche" };
+      if (!updateRefRes.ok) return { ok: false, error: await ghError(updateRefRes, "Échec de la mise à jour de la branche") };
 
       void loadCommits(token, selectedRepo, currentBranch);
       return { ok: true, deletedCount: blobCount };
@@ -524,7 +632,7 @@ export function GitHubProvider({ children }: { children: React.ReactNode }) {
         token, user, repos, selectedRepo, branches, currentBranch,
         commits, loading, reposLoading,
         login, logout, selectRepo, selectBranch,
-        fetchRepos, refreshCommits, pushFile, deleteDirectory, clearRepo,
+        fetchRepos, refreshCommits, pushFile, pushFiles, deleteDirectory, clearRepo,
       }}
     >
       {children}
