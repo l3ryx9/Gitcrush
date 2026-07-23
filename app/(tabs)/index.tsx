@@ -87,7 +87,7 @@ export default function HomeScreen() {
   if (!user) return null;
 
   const filteredRepos = repos.filter((r) =>
-    r.name.toLowerCase().includes(repoSearch.toLowerCase())
+    r.full_name.toLowerCase().includes(repoSearch.trim().toLowerCase())
   );
 
   async function onRefresh() {
