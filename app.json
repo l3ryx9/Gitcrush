@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "youme2",
-    "slug": "youmeyoutoo",
+    "name": "Gitcrush",
+    "slug": "gitcrush",
     "owner": "lolilo9",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -36,11 +36,11 @@
     },
     "extra": {
       "eas": {
-        "projectId": "a575d87e-f5b4-4a53-84a2-3fc99ceb72a0"
+        "projectId": "6a0f27cc-5b85-4865-a52b-9b7adfcb99de"
       }
     },
     "updates": {
-      "url": "https://u.expo.dev/a575d87e-f5b4-4a53-84a2-3fc99ceb72a0"
+      "url": "https://u.expo.dev/6a0f27cc-5b85-4865-a52b-9b7adfcb99de"
     }
   }
 }
