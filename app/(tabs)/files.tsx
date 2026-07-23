@@ -60,7 +60,7 @@ export default function FilesScreen() {
   const { t } = useI18n();
   const {
     user, repos, selectedRepo, branches, currentBranch,
-    selectRepo, selectBranch, pushFile, deleteDirectory, clearRepo,
+    selectRepo, selectBranch, pushFile, pushFiles, deleteDirectory, clearRepo,
     reposLoading, loading,
   } = useGitHub();
   const [file, setFile] = useState<SelectedFile | null>(null);
@@ -193,43 +193,43 @@ export default function FilesScreen() {
         const rawPaths = entries.map((e) => e.name.replace(/^\/+/, ""));
         const stripPrefix = commonDirPrefix(rawPaths);
 
-        let successCount = 0;
-        const errors: string[] = [];
+        // Lecture de toutes les entrées d'abord (rapide, local), puis UN
+        // SEUL push groupé (blobs en parallèle + un seul commit) — beaucoup
+        // plus rapide qu'un push fichier par fichier créant un commit à
+        // chaque fois.
         setPushProgress({ done: 0, total: entries.length });
-
-        for (let i = 0; i < entries.length; i++) {
-          const entry = entries[i];
+        const toPush: { path: string; content: string }[] = [];
+        const readErrors: string[] = [];
+        for (const entry of entries) {
           try {
             const content = await entry.async("base64");
             const raw = entry.name.replace(/^\/+/, "");
             const relPath = stripPrefix && raw.startsWith(stripPrefix)
               ? raw.slice(stripPrefix.length)
               : raw;
-            if (!relPath) { setPushProgress({ done: i + 1, total: entries.length }); continue; }
+            if (!relPath) continue;
             const path = targetPath.trim()
               ? `${targetPath.trim().replace(/\/$/, "")}/${relPath}`
               : relPath;
-            const res = await pushFile(path, content, commitMsg.trim());
-            if (res.ok) {
-              successCount++;
-            } else {
-              errors.push(`${relPath}: ${res.error ?? t("msg.unknownError")}`);
-            }
+            toPush.push({ path, content });
           } catch (e) {
-            errors.push(`${entry.name}: ${String(e)}`);
+            readErrors.push(`${entry.name}: ${String(e)}`);
           }
-          setPushProgress({ done: i + 1, total: entries.length });
         }
+
+        const res = await pushFiles(toPush, commitMsg.trim(), (done, total) => {
+          setPushProgress({ done, total });
+        });
 
         setPushing(false);
         setPushProgress(null);
 
-        if (successCount > 0) {
+        if (res.ok) {
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {/**/});
           setFile(null);
           const body =
             t("msg.filesPushed", {
-              done: successCount,
+              done: res.pushedCount ?? toPush.length,
               total: entries.length,
               repo: selectedRepo.name,
               branch: currentBranch,
@@ -241,14 +241,9 @@ export default function FilesScreen() {
             { text: t("msg.viewCommits"), onPress: () => router.push("/(tabs)") },
             { text: t("msg.ok") },
           ]);
-        }
-        if (errors.length > 0) {
+        } else {
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {/**/});
-          showAlert(
-            t("msg.errors"),
-            errors.slice(0, 20).join("\n") +
-              (errors.length > 20 ? `\n${t("msg.andOthers", { n: errors.length - 20 })}` : "")
-          );
+          showAlert(t("msg.errors"), [res.error, ...readErrors].filter(Boolean).join("\n"));
         }
         return;
       }
@@ -381,13 +376,6 @@ export default function FilesScreen() {
       {/* Header */}
       <View style={[s.header, { paddingTop: insets.top + webTop }]}>
         <Text style={s.headerTitle}>{t("files.title")}</Text>
-        {file && (
-          <Pressable onPress={() => setFile(null)} hitSlop={8}>
-            <Text style={{ color: colors.destructive, fontFamily: "Inter_500Medium", fontSize: 14 }}>
-              {t("files.clearSelection")}
-            </Text>
-          </Pressable>
-        )}
       </View>
 
       <ScrollView style={s.scroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
